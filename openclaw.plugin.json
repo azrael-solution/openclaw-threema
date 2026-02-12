@@ -1,0 +1,81 @@
+{
+  "id": "threema",
+  "name": "Threema Gateway",
+  "description": "Threema messaging channel via Threema Gateway API (E2E encrypted)",
+  "version": "0.3.0",
+  "channels": ["threema"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable/disable the Threema channel"
+      },
+      "gatewayId": {
+        "type": "string",
+        "description": "Threema Gateway ID (starts with *)",
+        "pattern": "^\\*[A-Z0-9]{7}$"
+      },
+      "secretKey": {
+        "type": "string",
+        "description": "Threema Gateway secret key"
+      },
+      "privateKey": {
+        "type": "string",
+        "description": "NaCl private key (hex, 64 chars) for E2E mode"
+      },
+      "webhookPath": {
+        "type": "string",
+        "description": "Webhook path for incoming messages",
+        "default": "/threema/webhook"
+      },
+      "webhookSecret": {
+        "type": "string",
+        "description": "HMAC secret for webhook verification"
+      },
+      "dmPolicy": {
+        "type": "string",
+        "enum": ["pairing", "allowlist", "open", "disabled"],
+        "default": "pairing"
+      },
+      "allowFrom": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Allowed Threema IDs for DMs"
+      },
+      "textChunkLimit": {
+        "type": "integer",
+        "default": 3500,
+        "description": "Max chars per message (Threema limit: 3500)"
+      }
+    },
+    "required": ["gatewayId", "secretKey"]
+  },
+  "uiHints": {
+    "gatewayId": {
+      "label": "Gateway ID",
+      "placeholder": "*MYID001"
+    },
+    "secretKey": {
+      "label": "API Secret",
+      "sensitive": true
+    },
+    "privateKey": {
+      "label": "E2E Private Key",
+      "sensitive": true,
+      "help": "Generate with: openclaw threema keygen"
+    },
+    "webhookSecret": {
+      "label": "Webhook HMAC Secret",
+      "sensitive": true
+    },
+    "dmPolicy": {
+      "label": "DM Policy",
+      "help": "Access control for direct messages"
+    },
+    "allowFrom": {
+      "label": "Allowed Threema IDs"
+    }
+  }
+}
