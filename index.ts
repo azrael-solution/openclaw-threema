@@ -12,6 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
 import * as crypto from "crypto";
+import * as dns from "node:dns/promises";
 
 // ============================================================================
 // Types (matching OpenClaw's expected interfaces)
@@ -146,6 +147,13 @@ const MEDIA_INBOUND_DIR = path.join(
   "inbound"
 );
 
+// Allowed base directory for local media files (exfiltration protection)
+const MEDIA_ALLOWED_BASE = path.join(
+  process.env.HOME || "/tmp",
+  ".openclaw",
+  "media"
+);
+
 // Message-ID dedup cache (replay protection): messageId -> timestamp
 const seenMsgIds = new Map<string, number>();
 const MSG_ID_TTL_MS = 15 * 60 * 1000; // 15 minutes
@@ -211,15 +219,16 @@ class ThreemaClient {
       secret: this.secretKey,
     });
 
-    const res = await fetch(`${THREEMA_API_BASE}/send_e2e`, {
+    const url = `${THREEMA_API_BASE}/send_e2e`;
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: params.toString(),
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Threema E2E API error ${res.status}: ${errText}`);
+      // Don't log response body (may contain secrets)
+      throw new Error(`Threema E2E API error ${res.status}`);
     }
 
     return res.text();
@@ -290,15 +299,16 @@ class ThreemaClient {
       secret: this.secretKey,
     });
 
-    const res = await fetch(`${THREEMA_API_BASE}/send_e2e`, {
+    const url = `${THREEMA_API_BASE}/send_e2e`;
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: params.toString(),
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Threema E2E API error ${res.status}: ${errText}`);
+      // Don't log response body (may contain secrets)
+      throw new Error(`Threema E2E API error ${res.status}`);
     }
 
     return res.text();
@@ -319,8 +329,8 @@ class ThreemaClient {
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Threema blob upload error ${res.status}: ${errText}`);
+      // Don't log response body or URL (contains secret)
+      throw new Error(`Threema blob upload error ${res.status}: ${sanitizeUrl(url)}`);
     }
 
     // Response is the blob ID
@@ -336,8 +346,8 @@ class ThreemaClient {
     const res = await fetch(url);
 
     if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Threema blob download error ${res.status}: ${errText}`);
+      // Don't log response body or full URL (contains secret)
+      throw new Error(`Threema blob download error ${res.status}: ${sanitizeUrl(url)}`);
     }
 
     const buffer = await res.arrayBuffer();
@@ -368,15 +378,16 @@ class ThreemaClient {
       secret: this.secretKey,
     });
 
-    const res = await fetch(`${THREEMA_API_BASE}/send_simple`, {
+    const url = `${THREEMA_API_BASE}/send_simple`;
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: params.toString(),
     });
 
     if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Threema API error ${res.status}: ${errText}`);
+      // Don't log response body (may contain secrets)
+      throw new Error(`Threema API error ${res.status}`);
     }
 
     return res.text();
@@ -389,11 +400,11 @@ class ThreemaClient {
     const cached = this.publicKeyCache.get(threemaId);
     if (cached) return cached;
 
-    const res = await fetch(
-      `${THREEMA_API_BASE}/pubkeys/${threemaId}?from=${this.gatewayId}&secret=${this.secretKey}`
-    );
+    const url = `${THREEMA_API_BASE}/pubkeys/${threemaId}?from=${this.gatewayId}&secret=${this.secretKey}`;
+    const res = await fetch(url);
 
     if (!res.ok) {
+      // Don't include URL in error (contains secret)
       throw new Error(
         `Failed to get public key for ${threemaId}: ${res.status}`
       );
@@ -573,43 +584,161 @@ function isDuplicateMsgId(messageId: string): boolean {
 }
 
 /**
+ * Sanitize URL by redacting secret query parameter
+ * Prevents API secrets from leaking into logs/error messages
+ */
+function sanitizeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.searchParams.has("secret")) {
+      parsed.searchParams.set("secret", "REDACTED");
+    }
+    return parsed.toString();
+  } catch {
+    // If URL parsing fails, do regex replacement
+    return url.replace(/secret=[^&]+/gi, "secret=REDACTED");
+  }
+}
+
+/**
+ * Check if an IP address is private/internal (for SSRF protection)
+ */
+function isPrivateIP(ip: string): boolean {
+  // Normalize IPv6-mapped IPv4 (::ffff:127.0.0.1 -> 127.0.0.1)
+  const normalizedIP = ip.replace(/^::ffff:/i, "");
+  
+  // Check IPv4
+  const ipv4Match = normalizedIP.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (ipv4Match) {
+    const [, a, b, c] = ipv4Match.map(Number);
+    // 0.0.0.0/8 (current network)
+    if (a === 0) return true;
+    // 10.0.0.0/8 (private)
+    if (a === 10) return true;
+    // 127.0.0.0/8 (loopback)
+    if (a === 127) return true;
+    // 169.254.0.0/16 (link-local)
+    if (a === 169 && b === 254) return true;
+    // 172.16.0.0/12 (private)
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    // 192.168.0.0/16 (private)
+    if (a === 192 && b === 168) return true;
+    // 100.64.0.0/10 (CGNAT)
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+  
+  // Check IPv6
+  const ipLower = ip.toLowerCase();
+  // ::1 (loopback)
+  if (ipLower === "::1") return true;
+  // fc00::/7 (unique local)
+  if (ipLower.startsWith("fc") || ipLower.startsWith("fd")) return true;
+  // fe80::/10 (link-local)
+  if (ipLower.startsWith("fe8") || ipLower.startsWith("fe9") || 
+      ipLower.startsWith("fea") || ipLower.startsWith("feb")) return true;
+  
+  return false;
+}
+
+/**
+ * Resolve hostname via DNS and check if it resolves to a private IP (DNS rebinding protection)
+ */
+async function resolveAndCheckPrivate(hostname: string): Promise<{ isPrivate: boolean; resolvedIP?: string }> {
+  // Block .local domains (mDNS)
+  if (hostname.toLowerCase().endsWith(".local")) {
+    return { isPrivate: true };
+  }
+  
+  // Block localhost explicitly
+  if (hostname.toLowerCase() === "localhost") {
+    return { isPrivate: true, resolvedIP: "127.0.0.1" };
+  }
+  
+  try {
+    // Resolve hostname to IP
+    const result = await dns.lookup(hostname);
+    const resolvedIP = result.address;
+    
+    // Check if resolved IP is private
+    if (isPrivateIP(resolvedIP)) {
+      return { isPrivate: true, resolvedIP };
+    }
+    
+    return { isPrivate: false, resolvedIP };
+  } catch {
+    // DNS resolution failed - block to be safe
+    return { isPrivate: true };
+  }
+}
+
+/**
  * Check if URL hostname is a private/internal IP (SSRF protection)
+ * Note: This only checks the hostname string, not resolved IP.
+ * Use resolveAndCheckPrivate() for DNS rebinding protection.
  */
 function isPrivateUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     const hostname = parsed.hostname.toLowerCase();
     
-    // Block localhost
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") {
+    // Block localhost and .local domains
+    if (hostname === "localhost" || hostname.endsWith(".local")) {
       return true;
     }
     
-    // Block IPv6 loopback
-    if (hostname === "::1") return true;
-    
-    // Block private IPv4 ranges
-    const ipv4Match = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (ipv4Match) {
-      const [, a, b] = ipv4Match.map(Number);
-      // 10.x.x.x
-      if (a === 10) return true;
-      // 172.16-31.x.x
-      if (a === 172 && b >= 16 && b <= 31) return true;
-      // 192.168.x.x
-      if (a === 192 && b === 168) return true;
-      // 127.x.x.x
-      if (a === 127) return true;
+    // Block IPv4/IPv6 loopback in URL
+    if (hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1") {
+      return true;
     }
     
-    // Block IPv6 private (fc00::/7 = fc00:: - fdff::)
-    if (hostname.startsWith("[fc") || hostname.startsWith("[fd")) {
+    // Block private IPv4 ranges when IP is directly in URL
+    const ipv4Match = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ipv4Match) {
+      return isPrivateIP(hostname);
+    }
+    
+    // Block IPv6 private when IP is directly in URL
+    if (hostname.startsWith("[fc") || hostname.startsWith("[fd") ||
+        hostname.startsWith("[fe8") || hostname.startsWith("[fe9")) {
       return true;
     }
     
     return false;
   } catch {
     return true; // Invalid URL = block
+  }
+}
+
+/**
+ * Validate local file path is within allowed media directory
+ * Prevents exfiltration of arbitrary files
+ */
+function validateLocalMediaPath(filePath: string): { valid: boolean; realPath?: string; error?: string } {
+  try {
+    // Resolve symlinks and normalize path
+    const realPath = fs.realpathSync(filePath);
+    
+    // Ensure the allowed base exists (create if needed for the check)
+    if (!fs.existsSync(MEDIA_ALLOWED_BASE)) {
+      fs.mkdirSync(MEDIA_ALLOWED_BASE, { recursive: true });
+    }
+    const allowedBase = fs.realpathSync(MEDIA_ALLOWED_BASE);
+    
+    // Check if real path is within allowed directory
+    if (!realPath.startsWith(allowedBase + path.sep) && realPath !== allowedBase) {
+      return { 
+        valid: false, 
+        error: "Local file path not allowed outside media directory" 
+      };
+    }
+    
+    return { valid: true, realPath };
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      return { valid: false, error: "File not found" };
+    }
+    return { valid: false, error: `Path validation failed: ${err.message}` };
   }
 }
 
@@ -1176,13 +1305,26 @@ const threemaChannel = {
           ctx.mediaUrl.startsWith("/") ||
           ctx.mediaUrl.startsWith("file://")
         ) {
-          filePath = ctx.mediaUrl.replace("file://", "");
+          // Local file path - validate it's within allowed media directory
+          const rawPath = ctx.mediaUrl.replace("file://", "");
+          const validation = validateLocalMediaPath(rawPath);
+          if (!validation.valid) {
+            throw new Error(validation.error || "Local file path not allowed outside media directory");
+          }
+          filePath = validation.realPath!;
         } else if (ctx.mediaUrl.startsWith("https://")) {
           // Only allow HTTPS URLs (no HTTP for security)
           
-          // SSRF protection: block private/internal IPs
+          // SSRF protection: block private/internal IPs (hostname check)
           if (isPrivateUrl(ctx.mediaUrl)) {
             throw new Error("Private/internal URLs not allowed for security.");
+          }
+          
+          // DNS rebinding protection: resolve hostname and check resolved IP
+          const parsed = new URL(ctx.mediaUrl);
+          const dnsCheck = await resolveAndCheckPrivate(parsed.hostname);
+          if (dnsCheck.isPrivate) {
+            throw new Error(`URL resolves to private/internal IP (${dnsCheck.resolvedIP || "blocked domain"})`);
           }
           
           const tempDir = path.join(
@@ -1419,7 +1561,7 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.4.1";
+export const version = "0.4.2";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -1466,8 +1608,9 @@ export default function register(api: any) {
 
           const { from, to, nonce, box, nickname, messageId, mac, date } = body;
 
-          // Log only metadata (no sensitive data like box, nonce)
-          api.logger?.info?.(`Threema webhook: from=${from} to=${to} messageId=${messageId}`);
+          // Info log without PII, debug log with details
+          api.logger?.info?.("Threema webhook received");
+          api.logger?.debug?.(`Threema webhook details: from=${from} messageId=${messageId}`);
 
           // === VALIDATION PHASE ===
 
@@ -1560,8 +1703,9 @@ export default function register(api: any) {
           const senderLabel = nickname || from;
 
           if (decrypted?.type === 0x01 && decrypted?.text) {
-            // Text message - don't log message content (log-redaction)
-            api.logger?.info?.(`Threema text from ${from}, type=0x01`);
+            // Text message - PII only on debug level
+            api.logger?.info?.("Threema text message received");
+            api.logger?.debug?.(`Threema text from=${from} messageId=${messageId}`);
 
             // Dispatch to OpenClaw via enqueueSystemEvent
             const enqueue = runtime?.system?.enqueueSystemEvent;
@@ -1584,11 +1728,10 @@ export default function register(api: any) {
               api.logger?.warn?.("enqueueSystemEvent not available");
             }
           } else if (decrypted?.type === 0x17 && decrypted?.fileMessage) {
-            // File message - log only metadata, not caption
+            // File message - PII only on debug level
             const fileMsg = decrypted.fileMessage;
-            api.logger?.info?.(
-              `Threema file from ${from}: ${fileMsg.m} (${fileMsg.s} bytes)`
-            );
+            api.logger?.info?.(`Threema file received: ${fileMsg.m} (${fileMsg.s} bytes)`);
+            api.logger?.debug?.(`Threema file from=${from} messageId=${messageId}`);
 
             // Process the file: download, decrypt, save, maybe transcribe
             const result = await processFileMessage(
@@ -1636,7 +1779,7 @@ export default function register(api: any) {
               wakeAgent(config);
             }
           } else if (decrypted?.type === 0x80) {
-            // Delivery receipt
+            // Delivery receipt - PII only on debug level
             const statusNames: Record<number, string> = {
               1: "received",
               2: "read",
@@ -1644,8 +1787,9 @@ export default function register(api: any) {
               4: "declined",
             };
             api.logger?.info?.(
-              `Threema delivery receipt from ${from}: ${statusNames[decrypted.status || 0] || "unknown"}`
+              `Threema delivery receipt: ${statusNames[decrypted.status || 0] || "unknown"}`
             );
+            api.logger?.debug?.(`Threema receipt from=${from}`);
           } else if (decrypted) {
             api.logger?.info?.(
               `Threema message type 0x${decrypted.type.toString(16)} from ${from} (not yet supported)`
