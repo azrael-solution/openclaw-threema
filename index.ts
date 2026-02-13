@@ -23,7 +23,6 @@ interface ThreemaConfig {
   secretKey: string;
   privateKey?: string; // hex-encoded NaCl private key for E2E
   webhookPath?: string;
-  webhookSecret?: string;
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   allowFrom?: string[];
   textChunkLimit?: number;
@@ -146,6 +145,11 @@ const MEDIA_INBOUND_DIR = path.join(
   "media",
   "inbound"
 );
+
+// Message-ID dedup cache (replay protection): messageId -> timestamp
+const seenMsgIds = new Map<string, number>();
+const MSG_ID_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const MSG_ID_CACHE_MAX = 5000;
 
 // Audio MIME types that should be transcribed
 const AUDIO_MIME_TYPES = [
@@ -422,11 +426,24 @@ class ThreemaClient {
     const decrypted = nacl.box.open(box, nonce, senderPubKey, this.privateKey);
     if (!decrypted) return null;
 
+    // Validate PKCS7 padding
+    const padLen = decrypted[decrypted.length - 1];
+    
+    // padLen must be 1-255
+    if (padLen < 1) return null;
+    
+    // decrypted.length must be at least 1 (type) + padLen
+    if (decrypted.length < 1 + padLen) return null;
+    
+    // PKCS7 consistency: all last padLen bytes must equal padLen
+    for (let i = decrypted.length - padLen; i < decrypted.length; i++) {
+      if (decrypted[i] !== padLen) return null;
+    }
+
     const type = decrypted[0];
 
     // Remove PKCS7 padding
-    const padByte = decrypted[decrypted.length - 1];
-    const unpaddedLen = decrypted.length - padByte;
+    const unpaddedLen = decrypted.length - padLen;
     const payload = decrypted.slice(1, unpaddedLen);
 
     if (type === 0x01) {
@@ -500,29 +517,100 @@ function generateKeyPair(): { privateKey: string; publicKey: string } {
 
 /**
  * Build E2E payload with spec-compliant PKCS7 random padding
- * Random padding 1-255 bytes, minimum 32 bytes padded-data
+ * Random padding 1-255 bytes, minimum 32 bytes padded-data (EXCLUDING type byte per Threema spec)
  */
 function buildE2EPayload(type: number, inner: Uint8Array): Uint8Array {
-  const MIN_PADDED_SIZE = 32;
+  const MIN_PADDED_DATA_SIZE = 32; // inner + padding >= 32 (excluding type byte)
+  
   // Random pad length 1-255 bytes
   const randByte = nacl.randomBytes(1)[0];
-  const randomPadLen = (randByte % 255) + 1; // 1-255
+  let padLen = (randByte % 255) + 1; // 1-255
   
-  const totalLen = 1 + inner.length + randomPadLen; // type byte + inner + padding
-  const paddedLen = Math.max(MIN_PADDED_SIZE, totalLen);
-  const actualPadLen = paddedLen - 1 - inner.length;
+  // Ensure inner + padLen >= 32 (padded-data without type byte)
+  if (inner.length + padLen < MIN_PADDED_DATA_SIZE) {
+    padLen = MIN_PADDED_DATA_SIZE - inner.length;
+  }
   
-  const payload = new Uint8Array(paddedLen);
+  // payload = 1 (type) + inner.length + padLen
+  const payload = new Uint8Array(1 + inner.length + padLen);
   payload[0] = type;
   payload.set(inner, 1);
   
   // Fill with PKCS7 padding (pad byte = padding length)
-  const padByte = actualPadLen & 0xff;
-  for (let i = 1 + inner.length; i < paddedLen; i++) {
+  const padByte = padLen & 0xff;
+  for (let i = 1 + inner.length; i < payload.length; i++) {
     payload[i] = padByte;
   }
   
   return payload;
+}
+
+/**
+ * Check if a message ID has been seen recently (replay protection)
+ * Returns true if duplicate (should be ignored)
+ */
+function isDuplicateMsgId(messageId: string): boolean {
+  const now = Date.now();
+  
+  // Cleanup old entries if cache is too large
+  if (seenMsgIds.size > MSG_ID_CACHE_MAX) {
+    for (const [id, ts] of seenMsgIds) {
+      if (now - ts > MSG_ID_TTL_MS) {
+        seenMsgIds.delete(id);
+      }
+    }
+  }
+  
+  // Check if seen
+  const seenAt = seenMsgIds.get(messageId);
+  if (seenAt && now - seenAt < MSG_ID_TTL_MS) {
+    return true; // duplicate
+  }
+  
+  // Mark as seen
+  seenMsgIds.set(messageId, now);
+  return false;
+}
+
+/**
+ * Check if URL hostname is a private/internal IP (SSRF protection)
+ */
+function isPrivateUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    
+    // Block localhost
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") {
+      return true;
+    }
+    
+    // Block IPv6 loopback
+    if (hostname === "::1") return true;
+    
+    // Block private IPv4 ranges
+    const ipv4Match = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ipv4Match) {
+      const [, a, b] = ipv4Match.map(Number);
+      // 10.x.x.x
+      if (a === 10) return true;
+      // 172.16-31.x.x
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      // 192.168.x.x
+      if (a === 192 && b === 168) return true;
+      // 127.x.x.x
+      if (a === 127) return true;
+    }
+    
+    // Block IPv6 private (fc00::/7 = fc00:: - fdff::)
+    if (hostname.startsWith("[fc") || hostname.startsWith("[fd")) {
+      return true;
+    }
+    
+    return false;
+  } catch {
+    return true; // Invalid URL = block
+  }
 }
 
 /**
@@ -768,9 +856,10 @@ async function processFileMessage(
   logger?: ChannelLogSink
 ): Promise<{ filePath: string; transcription?: string } | null> {
   try {
-    // Ensure media directory exists
+    // Ensure media directory exists with secure permissions
     if (!fs.existsSync(MEDIA_INBOUND_DIR)) {
       fs.mkdirSync(MEDIA_INBOUND_DIR, { recursive: true });
+      fs.chmodSync(MEDIA_INBOUND_DIR, 0o700);
     }
 
     // Download encrypted blob
@@ -801,7 +890,8 @@ async function processFileMessage(
 
     // Save to disk with restrictive permissions
     fs.writeFileSync(filePath, decryptedData, { mode: 0o600 });
-    logger?.info?.(`Saved file: ${fileName} (${fileMsg.m})`);
+    logger?.debug?.(`Saved file: ${fileName}`);
+    logger?.info?.(`Saved file (${fileMsg.m}, ${decryptedData.length} bytes)`);
 
     // Transcribe if audio
     let transcription: string | undefined;
@@ -928,7 +1018,6 @@ const threemaChannel = {
         privateKey: threemaCfg?.privateKey,
         enabled: threemaCfg?.enabled,
         webhookPath: threemaCfg?.webhookPath,
-        webhookSecret: threemaCfg?.webhookSecret,
         dmPolicy: threemaCfg?.dmPolicy,
         allowFrom: threemaCfg?.allowFrom,
         textChunkLimit: threemaCfg?.textChunkLimit,
@@ -1090,6 +1179,12 @@ const threemaChannel = {
           filePath = ctx.mediaUrl.replace("file://", "");
         } else if (ctx.mediaUrl.startsWith("https://")) {
           // Only allow HTTPS URLs (no HTTP for security)
+          
+          // SSRF protection: block private/internal IPs
+          if (isPrivateUrl(ctx.mediaUrl)) {
+            throw new Error("Private/internal URLs not allowed for security.");
+          }
+          
           const tempDir = path.join(
             process.env.HOME || "/tmp",
             ".openclaw",
@@ -1099,18 +1194,47 @@ const threemaChannel = {
           if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
           }
-          const res = await fetch(ctx.mediaUrl);
-          if (!res.ok) {
-            throw new Error(`Failed to download media: ${res.status}`);
+          
+          // Fetch with timeout and size limit
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+          
+          try {
+            const res = await fetch(ctx.mediaUrl, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            
+            if (!res.ok) {
+              throw new Error(`Failed to download media: ${res.status}`);
+            }
+            
+            // DoS protection: check Content-Length before downloading
+            const contentLength = res.headers.get("content-length");
+            const MAX_MEDIA_SIZE = 50 * 1024 * 1024; // 50MB
+            if (contentLength && parseInt(contentLength, 10) > MAX_MEDIA_SIZE) {
+              throw new Error(`Media too large (${contentLength} bytes > 50MB limit)`);
+            }
+            
+            const buffer = await res.arrayBuffer();
+            
+            // Also check actual size after download
+            if (buffer.byteLength > MAX_MEDIA_SIZE) {
+              throw new Error(`Media too large (${buffer.byteLength} bytes > 50MB limit)`);
+            }
+            
+            const urlPath = new URL(ctx.mediaUrl).pathname;
+            const rawFileName = path.basename(urlPath) || `media_${Date.now()}`;
+            // Sanitize downloaded filename
+            const fileName = sanitizeFilename(rawFileName);
+            filePath = path.join(tempDir, fileName);
+            tempFilePath = filePath; // Mark for cleanup
+            fs.writeFileSync(filePath, new Uint8Array(buffer), { mode: 0o600 });
+          } catch (err: any) {
+            clearTimeout(timeoutId);
+            if (err.name === "AbortError") {
+              throw new Error("Media download timed out (15s)");
+            }
+            throw err;
           }
-          const buffer = await res.arrayBuffer();
-          const urlPath = new URL(ctx.mediaUrl).pathname;
-          const rawFileName = path.basename(urlPath) || `media_${Date.now()}`;
-          // Sanitize downloaded filename
-          const fileName = sanitizeFilename(rawFileName);
-          filePath = path.join(tempDir, fileName);
-          tempFilePath = filePath; // Mark for cleanup
-          fs.writeFileSync(filePath, new Uint8Array(buffer), { mode: 0o600 });
         } else if (ctx.mediaUrl.startsWith("http://")) {
           throw new Error("HTTP URLs not allowed for security. Use HTTPS.");
         } else {
@@ -1295,7 +1419,7 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.4.0";
+export const version = "0.4.1";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -1396,7 +1520,15 @@ export default function register(api: any) {
             return;
           }
 
-          if ((dmPolicy === "allowlist" || dmPolicy === "pairing") && allowFrom.length > 0) {
+          if (dmPolicy === "allowlist" || dmPolicy === "pairing") {
+            // Default-deny: empty allowlist = block all
+            if (allowFrom.length === 0) {
+              api.logger?.info?.(`Threema DM policy: ${dmPolicy} with empty allowlist, rejecting from=${from}`);
+              res.writeHead(403, { "Content-Type": "text/plain" });
+              res.end("Allowlist empty");
+              return;
+            }
+            
             const normalizedFrom = normalizeThreemaTarget(from);
             const normalizedAllowFrom = allowFrom.map(id => normalizeThreemaTarget(id));
             if (!normalizedAllowFrom.includes(normalizedFrom)) {
@@ -1405,6 +1537,14 @@ export default function register(api: any) {
               res.end("Sender not authorized");
               return;
             }
+          }
+          
+          // 6. Message-ID dedup (replay protection) - AFTER MAC, BEFORE decrypt
+          if (isDuplicateMsgId(messageId)) {
+            api.logger?.info?.(`Threema webhook: duplicate messageId=${messageId}, ignoring`);
+            res.writeHead(200, { "Content-Type": "text/plain" });
+            res.end("OK");
+            return;
           }
 
           // === PROCESSING PHASE ===

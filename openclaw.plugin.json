@@ -2,7 +2,7 @@
   "id": "threema",
   "name": "Threema Gateway",
   "description": "Threema messaging channel via Threema Gateway API (E2E encrypted)",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "channels": ["threema"],
   "configSchema": {
     "type": "object",
@@ -29,10 +29,6 @@
         "type": "string",
         "description": "Webhook path for incoming messages",
         "default": "/threema/webhook"
-      },
-      "webhookSecret": {
-        "type": "string",
-        "description": "HMAC secret for webhook verification"
       },
       "dmPolicy": {
         "type": "string",
@@ -65,10 +61,6 @@
       "label": "E2E Private Key",
       "sensitive": true,
       "help": "Generate with: openclaw threema keygen"
-    },
-    "webhookSecret": {
-      "label": "Webhook HMAC Secret",
-      "sensitive": true
     },
     "dmPolicy": {
       "label": "DM Policy",
