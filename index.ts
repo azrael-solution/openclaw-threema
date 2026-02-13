@@ -656,16 +656,17 @@ async function resolveAndCheckPrivate(hostname: string): Promise<{ isPrivate: bo
   }
   
   try {
-    // Resolve hostname to IP
-    const result = await dns.lookup(hostname);
-    const resolvedIP = result.address;
+    // Resolve hostname to ALL IPs (multi-A/AAAA protection)
+    const results = await dns.lookup(hostname, { all: true });
     
-    // Check if resolved IP is private
-    if (isPrivateIP(resolvedIP)) {
-      return { isPrivate: true, resolvedIP };
+    // Block if ANY resolved IP is private
+    for (const result of results) {
+      if (isPrivateIP(result.address)) {
+        return { isPrivate: true, resolvedIP: result.address };
+      }
     }
     
-    return { isPrivate: false, resolvedIP };
+    return { isPrivate: false, resolvedIP: results[0]?.address };
   } catch {
     // DNS resolution failed - block to be safe
     return { isPrivate: true };
@@ -721,7 +722,7 @@ function validateLocalMediaPath(filePath: string): { valid: boolean; realPath?: 
     
     // Ensure the allowed base exists (create if needed for the check)
     if (!fs.existsSync(MEDIA_ALLOWED_BASE)) {
-      fs.mkdirSync(MEDIA_ALLOWED_BASE, { recursive: true });
+      fs.mkdirSync(MEDIA_ALLOWED_BASE, { recursive: true, mode: 0o700 });
     }
     const allowedBase = fs.realpathSync(MEDIA_ALLOWED_BASE);
     
@@ -1347,7 +1348,7 @@ const threemaChannel = {
             "temp"
           );
           if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
+            fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
           }
           
           // Fetch with timeout and size limit
@@ -1355,8 +1356,7 @@ const threemaChannel = {
           const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
           
           try {
-            const res = await fetch(ctx.mediaUrl, { signal: controller.signal });
-            clearTimeout(timeoutId);
+            const res = await fetch(ctx.mediaUrl, { signal: controller.signal, redirect: "error" });
             
             if (!res.ok) {
               throw new Error(`Failed to download media: ${res.status}`);
@@ -1370,6 +1370,7 @@ const threemaChannel = {
             }
             
             const buffer = await res.arrayBuffer();
+            clearTimeout(timeoutId); // Clear AFTER full download completes
             
             // Also check actual size after download
             if (buffer.byteLength > MAX_MEDIA_SIZE) {

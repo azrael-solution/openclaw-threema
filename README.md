@@ -91,8 +91,7 @@ openclaw threema send ABCD1234 "Hello from OpenClaw!"
 
 | Policy | Description |
 |--------|-------------|
-| `pairing` | Only paired contacts (default) |
-| `allowlist` | Only IDs in `allowFrom` array |
+| `allowlist` | Only IDs in `allowFrom` array (default) |
 | `open` | Accept from anyone |
 | `disabled` | Reject all DMs |
 
@@ -113,8 +112,10 @@ Whisper must be installed and accessible in PATH (e.g., via `pip install openai-
 - All messages are end-to-end encrypted using NaCl (Curve25519 + XSalsa20-Poly1305)
 - File blobs are encrypted with random symmetric keys (XSalsa20-Poly1305 secretbox)
 - Private keys never leave the host
-- Webhook verification via HMAC (optional)
+- Webhook verification via HMAC-SHA256 (mandatory, verified before decryption)
+- SSRF protection: redirect blocking, DNS rebinding checks, private IP filtering
 
 ## License
 
 MIT
+
