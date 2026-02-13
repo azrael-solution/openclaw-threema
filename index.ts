@@ -24,7 +24,7 @@ interface ThreemaConfig {
   secretKey: string;
   privateKey?: string; // hex-encoded NaCl private key for E2E
   webhookPath?: string;
-  dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
+  dmPolicy?: "allowlist" | "open" | "disabled";
   allowFrom?: string[];
   textChunkLimit?: number;
 }
@@ -1446,13 +1446,13 @@ const threemaChannel = {
       accountId?: string | null;
       account: ResolvedThreemaAccount;
     }) => {
-      const policy = ctx.account.dmPolicy ?? "pairing";
+      const policy = ctx.account.dmPolicy ?? "allowlist";
       const allowFrom = ctx.account.allowFrom;
       return {
         policy,
         allowFrom: allowFrom ?? null,
         allowFromPath: "channels.threema.allowFrom",
-        approveHint: "Send /pair to start pairing",
+        approveHint: "Add Threema ID to channels.threema.allowFrom in config",
         normalizeEntry: normalizeThreemaTarget,
       };
     },
@@ -1562,7 +1562,7 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.4.2";
+export const version = "0.4.3";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -1580,7 +1580,7 @@ export default function register(api: any) {
     const client = new ThreemaClient(threemaCfg);
     const webhookPath = threemaCfg.webhookPath;
     const ownGatewayId = threemaCfg.gatewayId;
-    const dmPolicy = threemaCfg.dmPolicy ?? "pairing";
+    const dmPolicy = threemaCfg.dmPolicy ?? "allowlist";
     const allowFrom = threemaCfg.allowFrom ?? [];
 
     api.registerHttpRoute?.({
@@ -1664,10 +1664,10 @@ export default function register(api: any) {
             return;
           }
 
-          if (dmPolicy === "allowlist" || dmPolicy === "pairing") {
+          if (dmPolicy === "allowlist") {
             // Default-deny: empty allowlist = block all
             if (allowFrom.length === 0) {
-              api.logger?.info?.(`Threema DM policy: ${dmPolicy} with empty allowlist, rejecting from=${from}`);
+              api.logger?.info?.("Threema DM policy: allowlist with empty allowlist, rejecting");
               res.writeHead(403, { "Content-Type": "text/plain" });
               res.end("Allowlist empty");
               return;
@@ -1676,7 +1676,7 @@ export default function register(api: any) {
             const normalizedFrom = normalizeThreemaTarget(from);
             const normalizedAllowFrom = allowFrom.map(id => normalizeThreemaTarget(id));
             if (!normalizedAllowFrom.includes(normalizedFrom)) {
-              api.logger?.info?.(`Threema DM policy: sender ${from} not in allowlist`);
+              api.logger?.debug?.("Threema DM policy: sender not in allowlist");
               res.writeHead(403, { "Content-Type": "text/plain" });
               res.end("Sender not authorized");
               return;
@@ -1909,7 +1909,7 @@ export default function register(api: any) {
           console.log(
             `Mode: ${threemaCfg.privateKey ? "E2E (encrypted)" : "Basic (server-side)"}`
           );
-          console.log(`DM Policy: ${threemaCfg.dmPolicy ?? "pairing"}`);
+          console.log(`DM Policy: ${threemaCfg.dmPolicy ?? "allowlist"}`);
           console.log(
             `Webhook: ${threemaCfg.webhookPath ?? "(not configured)"}`
           );

@@ -2,7 +2,7 @@
   "id": "threema",
   "name": "Threema Gateway",
   "description": "Threema messaging channel via Threema Gateway API (E2E encrypted)",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "channels": ["threema"],
   "configSchema": {
     "type": "object",
@@ -32,8 +32,8 @@
       },
       "dmPolicy": {
         "type": "string",
-        "enum": ["pairing", "allowlist", "open", "disabled"],
-        "default": "pairing"
+        "enum": ["allowlist", "open", "disabled"],
+        "default": "allowlist"
       },
       "allowFrom": {
         "type": "array",
