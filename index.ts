@@ -10,7 +10,8 @@ import nacl from "tweetnacl";
 import { decodeUTF8 } from "tweetnacl-util";
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
+import * as crypto from "crypto";
 
 // ============================================================================
 // Types (matching OpenClaw's expected interfaces)
@@ -190,17 +191,9 @@ class ThreemaClient {
 
     const recipientPubKey = await this.getPublicKey(to);
 
-    // Create message payload (type 0x01 = text)
+    // Create message payload (type 0x01 = text) with spec-compliant random padding
     const textBytes = decodeUTF8(text);
-    const paddedLen = Math.ceil((textBytes.length + 1) / 256) * 256;
-    const payload = new Uint8Array(paddedLen);
-    payload[0] = 0x01; // Text message type
-    payload.set(textBytes, 1);
-    // Fill with PKCS7-style padding
-    const padByte = paddedLen - textBytes.length - 1;
-    for (let i = textBytes.length + 1; i < paddedLen; i++) {
-      payload[i] = padByte;
-    }
+    const payload = buildE2EPayload(0x01, textBytes);
 
     // Generate nonce and encrypt
     const nonce = nacl.randomBytes(24);
@@ -278,16 +271,8 @@ class ThreemaClient {
     const fileMsgJson = JSON.stringify(fileMsg);
     const fileMsgBytes = decodeUTF8(fileMsgJson);
 
-    // Create E2E payload (type 0x17 = file message)
-    const paddedLen = Math.ceil((fileMsgBytes.length + 1) / 256) * 256;
-    const payload = new Uint8Array(paddedLen);
-    payload[0] = 0x17; // File message type
-    payload.set(fileMsgBytes, 1);
-    // Fill with PKCS7-style padding
-    const padByte = paddedLen - fileMsgBytes.length - 1;
-    for (let i = fileMsgBytes.length + 1; i < paddedLen; i++) {
-      payload[i] = padByte;
-    }
+    // Create E2E payload (type 0x17 = file message) with spec-compliant random padding
+    const payload = buildE2EPayload(0x17, fileMsgBytes);
 
     // Generate nonce and encrypt with NaCl box
     const nonce = nacl.randomBytes(24);
@@ -513,6 +498,156 @@ function generateKeyPair(): { privateKey: string; publicKey: string } {
   };
 }
 
+/**
+ * Build E2E payload with spec-compliant PKCS7 random padding
+ * Random padding 1-255 bytes, minimum 32 bytes padded-data
+ */
+function buildE2EPayload(type: number, inner: Uint8Array): Uint8Array {
+  const MIN_PADDED_SIZE = 32;
+  // Random pad length 1-255 bytes
+  const randByte = nacl.randomBytes(1)[0];
+  const randomPadLen = (randByte % 255) + 1; // 1-255
+  
+  const totalLen = 1 + inner.length + randomPadLen; // type byte + inner + padding
+  const paddedLen = Math.max(MIN_PADDED_SIZE, totalLen);
+  const actualPadLen = paddedLen - 1 - inner.length;
+  
+  const payload = new Uint8Array(paddedLen);
+  payload[0] = type;
+  payload.set(inner, 1);
+  
+  // Fill with PKCS7 padding (pad byte = padding length)
+  const padByte = actualPadLen & 0xff;
+  for (let i = 1 + inner.length; i < paddedLen; i++) {
+    payload[i] = padByte;
+  }
+  
+  return payload;
+}
+
+/**
+ * Sanitize filename: only allow safe characters
+ */
+function sanitizeFilename(filename: string): string {
+  // Only allow alphanumeric, dots, dashes, and underscores
+  const sanitized = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  // Prevent directory traversal and hidden files
+  return sanitized.replace(/^\.+/, "_").replace(/\.{2,}/g, "_");
+}
+
+/**
+ * Compute Threema callback MAC for webhook verification
+ * MAC = HMAC-SHA256(from || to || messageId || date || nonce || box, secret)
+ */
+function computeThreemaCallbackMac(
+  from: string,
+  to: string,
+  messageId: string,
+  date: string,
+  nonce: string,
+  box: string,
+  secret: string
+): string {
+  const data = from + to + messageId + date + nonce + box;
+  return crypto.createHmac("sha256", secret).update(data).digest("hex");
+}
+
+/**
+ * Constant-time comparison for MAC verification
+ */
+function verifyMac(received: string, computed: string): boolean {
+  if (received.length !== computed.length) return false;
+  try {
+    const a = Buffer.from(received, "hex");
+    const b = Buffer.from(computed, "hex");
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate Threema webhook field formats
+ */
+function validateWebhookFields(body: any): { valid: boolean; error?: string } {
+  const { from, to, messageId, nonce, box, mac, date } = body;
+  
+  // from/to: 8 characters
+  if (!from || typeof from !== "string" || !/^[A-Z0-9*]{8}$/.test(from)) {
+    return { valid: false, error: "Invalid 'from' format" };
+  }
+  if (!to || typeof to !== "string" || !/^[A-Z0-9*]{8}$/.test(to)) {
+    return { valid: false, error: "Invalid 'to' format" };
+  }
+  
+  // messageId: 16 hex chars
+  if (!messageId || typeof messageId !== "string" || !/^[a-fA-F0-9]{16}$/.test(messageId)) {
+    return { valid: false, error: "Invalid 'messageId' format" };
+  }
+  
+  // nonce: 48 hex chars (24 bytes)
+  if (!nonce || typeof nonce !== "string" || !/^[a-fA-F0-9]{48}$/.test(nonce)) {
+    return { valid: false, error: "Invalid 'nonce' format" };
+  }
+  
+  // mac: 64 hex chars (32 bytes)
+  if (!mac || typeof mac !== "string" || !/^[a-fA-F0-9]{64}$/.test(mac)) {
+    return { valid: false, error: "Invalid 'mac' format" };
+  }
+  
+  // box: non-empty hex
+  if (!box || typeof box !== "string" || !/^[a-fA-F0-9]+$/.test(box)) {
+    return { valid: false, error: "Invalid 'box' format" };
+  }
+  
+  // date: numeric string (Unix timestamp)
+  if (date !== undefined && (typeof date !== "string" || !/^\d+$/.test(date))) {
+    return { valid: false, error: "Invalid 'date' format" };
+  }
+  
+  return { valid: true };
+}
+
+/**
+ * Read request body with size limit
+ */
+async function readBodyLimited(req: any, maxBytes: number = 128 * 1024): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    let received = 0;
+    
+    const onData = (chunk: Buffer | string) => {
+      const chunkLen = Buffer.byteLength(chunk);
+      received += chunkLen;
+      
+      if (received > maxBytes) {
+        req.removeListener("data", onData);
+        req.destroy();
+        reject(new Error("BODY_TOO_LARGE"));
+        return;
+      }
+      
+      data += chunk;
+    };
+    
+    req.on("data", onData);
+    req.on("end", () => {
+      try {
+        if (req.headers["content-type"]?.includes("json")) {
+          resolve(JSON.parse(data));
+        } else {
+          const params = new URLSearchParams(data);
+          resolve(Object.fromEntries(params));
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
 function chunkText(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
 
@@ -569,25 +704,43 @@ function getExtensionFromMime(mimeType: string): string {
 
 /**
  * Transcribe audio file using Whisper CLI
+ * Uses spawnSync with argument array to prevent command injection (RCE fix)
  */
 function transcribeAudio(filePath: string, logger?: ChannelLogSink): string | null {
   try {
-    // Check if whisper is available
-    const whisperPath = "/home/linuxbrew/.linuxbrew/bin/whisper";
-    if (!fs.existsSync(whisperPath)) {
-      logger?.warn?.("Whisper not found, skipping transcription");
-      return null;
-    }
-
+    // Get whisper path from env with fallback
+    const whisperPath = process.env.WHISPER_PATH || "whisper";
+    
     const outputDir = path.dirname(filePath);
     const baseName = path.basename(filePath, path.extname(filePath));
 
-    // Run whisper transcription
-    logger?.info?.(`Transcribing audio: ${filePath}`);
-    execSync(
-      `${whisperPath} "${filePath}" --model small --language de --output_format txt --output_dir "${outputDir}" 2>&1`,
-      { timeout: 120000 } // 2 minute timeout
-    );
+    // Run whisper transcription with spawnSync (no shell, argument array)
+    logger?.info?.(`Transcribing audio file`);
+    const result = spawnSync(whisperPath, [
+      filePath,
+      "--model", "small",
+      "--language", "de",
+      "--output_format", "txt",
+      "--output_dir", outputDir
+    ], {
+      timeout: 120000, // 2 minute timeout
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    if (result.error) {
+      // Check if whisper is not found
+      if ((result.error as any).code === "ENOENT") {
+        logger?.warn?.("Whisper not found, skipping transcription");
+        return null;
+      }
+      throw result.error;
+    }
+
+    if (result.status !== 0) {
+      logger?.error?.(`Whisper exited with code ${result.status}`);
+      return null;
+    }
 
     // Read the transcription output
     const txtPath = path.join(outputDir, `${baseName}.txt`);
@@ -595,7 +748,8 @@ function transcribeAudio(filePath: string, logger?: ChannelLogSink): string | nu
       const transcription = fs.readFileSync(txtPath, "utf-8").trim();
       // Clean up the txt file
       fs.unlinkSync(txtPath);
-      logger?.info?.(`Transcription complete: ${transcription.slice(0, 100)}...`);
+      // Don't log transcription content (log-redaction)
+      logger?.info?.(`Transcription complete (${transcription.length} chars)`);
       return transcription;
     }
   } catch (err: any) {
@@ -631,20 +785,23 @@ async function processFileMessage(
       return null;
     }
 
-    // Determine filename
+    // Determine filename with sanitization
     const timestamp = Date.now();
     const ext = fileMsg.n
       ? path.extname(fileMsg.n)
       : getExtensionFromMime(fileMsg.m);
-    const baseName = fileMsg.n
+    const rawBaseName = fileMsg.n
       ? path.basename(fileMsg.n, path.extname(fileMsg.n))
       : `threema_${from}_${timestamp}`;
-    const fileName = `${baseName}_${timestamp}${ext}`;
+    // Sanitize filename to prevent path traversal and injection
+    const baseName = sanitizeFilename(rawBaseName);
+    const safeExt = sanitizeFilename(ext);
+    const fileName = `${baseName}_${timestamp}${safeExt}`;
     const filePath = path.join(MEDIA_INBOUND_DIR, fileName);
 
-    // Save to disk
-    fs.writeFileSync(filePath, decryptedData);
-    logger?.info?.(`Saved file: ${filePath} (${fileMsg.m})`);
+    // Save to disk with restrictive permissions
+    fs.writeFileSync(filePath, decryptedData, { mode: 0o600 });
+    logger?.info?.(`Saved file: ${fileName} (${fileMsg.m})`);
 
     // Transcribe if audio
     let transcription: string | undefined;
@@ -688,28 +845,6 @@ function normalizeThreemaTarget(raw: string): string {
   // Uppercase the ID
   normalized = normalized.toUpperCase();
   return normalized;
-}
-
-async function parseBody(req: any): Promise<any> {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk: string) => {
-      data += chunk;
-    });
-    req.on("end", () => {
-      try {
-        if (req.headers["content-type"]?.includes("json")) {
-          resolve(JSON.parse(data));
-        } else {
-          const params = new URLSearchParams(data);
-          resolve(Object.fromEntries(params));
-        }
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on("error", reject);
-  });
 }
 
 /**
@@ -800,11 +935,11 @@ const threemaChannel = {
       };
     },
 
-    isEnabled: (account: ResolvedThreemaAccount): boolean => {
+    isEnabled: (account: ResolvedThreemaAccount, cfg?: OpenClawConfig): boolean => {
       return account.enabled !== false && !!account.gatewayId;
     },
 
-    isConfigured: (account: ResolvedThreemaAccount): boolean => {
+    isConfigured: (account: ResolvedThreemaAccount, cfg?: OpenClawConfig): boolean => {
       return !!(account.gatewayId && account.secretKey);
     },
 
@@ -817,7 +952,8 @@ const threemaChannel = {
     },
 
     describeAccount: (
-      account: ResolvedThreemaAccount
+      account: ResolvedThreemaAccount,
+      cfg?: OpenClawConfig
     ): ChannelAccountSnapshot => {
       return {
         accountId: account.accountId,
@@ -944,53 +1080,68 @@ const threemaChannel = {
 
       // Handle local file paths and URLs
       let filePath: string;
-      if (
-        ctx.mediaUrl.startsWith("/") ||
-        ctx.mediaUrl.startsWith("file://")
-      ) {
-        filePath = ctx.mediaUrl.replace("file://", "");
-      } else if (
-        ctx.mediaUrl.startsWith("http://") ||
-        ctx.mediaUrl.startsWith("https://")
-      ) {
-        // Download remote file to temp location
-        const tempDir = path.join(
-          process.env.HOME || "/tmp",
-          ".openclaw",
-          "media",
-          "temp"
-        );
-        if (!fs.existsSync(tempDir)) {
-          fs.mkdirSync(tempDir, { recursive: true });
+      let tempFilePath: string | null = null; // Track temp file for cleanup
+      
+      try {
+        if (
+          ctx.mediaUrl.startsWith("/") ||
+          ctx.mediaUrl.startsWith("file://")
+        ) {
+          filePath = ctx.mediaUrl.replace("file://", "");
+        } else if (ctx.mediaUrl.startsWith("https://")) {
+          // Only allow HTTPS URLs (no HTTP for security)
+          const tempDir = path.join(
+            process.env.HOME || "/tmp",
+            ".openclaw",
+            "media",
+            "temp"
+          );
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+          const res = await fetch(ctx.mediaUrl);
+          if (!res.ok) {
+            throw new Error(`Failed to download media: ${res.status}`);
+          }
+          const buffer = await res.arrayBuffer();
+          const urlPath = new URL(ctx.mediaUrl).pathname;
+          const rawFileName = path.basename(urlPath) || `media_${Date.now()}`;
+          // Sanitize downloaded filename
+          const fileName = sanitizeFilename(rawFileName);
+          filePath = path.join(tempDir, fileName);
+          tempFilePath = filePath; // Mark for cleanup
+          fs.writeFileSync(filePath, new Uint8Array(buffer), { mode: 0o600 });
+        } else if (ctx.mediaUrl.startsWith("http://")) {
+          throw new Error("HTTP URLs not allowed for security. Use HTTPS.");
+        } else {
+          throw new Error(`Unsupported media URL format: ${ctx.mediaUrl}`);
         }
-        const res = await fetch(ctx.mediaUrl);
-        if (!res.ok) {
-          throw new Error(`Failed to download media: ${res.status}`);
+
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`Media file not found: ${filePath}`);
         }
-        const buffer = await res.arrayBuffer();
-        const urlPath = new URL(ctx.mediaUrl).pathname;
-        const fileName = path.basename(urlPath) || `media_${Date.now()}`;
-        filePath = path.join(tempDir, fileName);
-        fs.writeFileSync(filePath, new Uint8Array(buffer));
-      } else {
-        throw new Error(`Unsupported media URL format: ${ctx.mediaUrl}`);
+
+        const mimeType = getMimeFromPath(filePath);
+        const caption = ctx.text || undefined;
+
+        const messageId = await client.sendFileE2E(to, filePath, mimeType, caption);
+
+        return {
+          channel: "threema",
+          messageId: messageId.trim(),
+          chatId: to,
+          timestamp: Date.now(),
+        };
+      } finally {
+        // Cleanup temp file
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
       }
-
-      if (!fs.existsSync(filePath)) {
-        throw new Error(`Media file not found: ${filePath}`);
-      }
-
-      const mimeType = getMimeFromPath(filePath);
-      const caption = ctx.text || undefined;
-
-      const messageId = await client.sendFileE2E(to, filePath, mimeType, caption);
-
-      return {
-        channel: "threema",
-        messageId: messageId.trim(),
-        chatId: to,
-        timestamp: Date.now(),
-      };
     },
   },
 
@@ -1144,7 +1295,7 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.3.0";
+export const version = "0.4.0";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -1161,6 +1312,9 @@ export default function register(api: any) {
   if (threemaCfg?.privateKey && threemaCfg?.webhookPath) {
     const client = new ThreemaClient(threemaCfg);
     const webhookPath = threemaCfg.webhookPath;
+    const ownGatewayId = threemaCfg.gatewayId;
+    const dmPolicy = threemaCfg.dmPolicy ?? "pairing";
+    const allowFrom = threemaCfg.allowFrom ?? [];
 
     api.registerHttpRoute?.({
       path: webhookPath,
@@ -1173,15 +1327,87 @@ export default function register(api: any) {
         }
 
         try {
-          const body = await parseBody(req);
-          api.logger?.info?.(`Threema webhook: ${JSON.stringify(body)}`);
+          // Parse body with size limit (128KB max)
+          let body: any;
+          try {
+            body = await readBodyLimited(req, 128 * 1024);
+          } catch (err: any) {
+            if (err.message === "BODY_TOO_LARGE") {
+              res.writeHead(413, { "Content-Type": "text/plain" });
+              res.end("Request Entity Too Large");
+              return;
+            }
+            throw err;
+          }
 
-          const { from, nonce, box, nickname, messageId } = body;
-          if (!from || !nonce || !box) {
+          const { from, to, nonce, box, nickname, messageId, mac, date } = body;
+
+          // Log only metadata (no sensitive data like box, nonce)
+          api.logger?.info?.(`Threema webhook: from=${from} to=${to} messageId=${messageId}`);
+
+          // === VALIDATION PHASE ===
+
+          // 1. Validate field formats
+          const validation = validateWebhookFields(body);
+          if (!validation.valid) {
+            api.logger?.warn?.(`Threema webhook validation failed: ${validation.error}`);
             res.writeHead(400, { "Content-Type": "text/plain" });
-            res.end("Missing required parameters: from, nonce, box");
+            res.end(validation.error || "Invalid request");
             return;
           }
+
+          // 2. Verify MAC BEFORE any further processing
+          const computedMac = computeThreemaCallbackMac(
+            from, to, messageId, date || "", nonce, box, threemaCfg.secretKey
+          );
+          if (!verifyMac(mac, computedMac)) {
+            api.logger?.warn?.(`Threema webhook MAC verification failed for messageId=${messageId}`);
+            res.writeHead(401, { "Content-Type": "text/plain" });
+            res.end("MAC verification failed");
+            return;
+          }
+
+          // 3. Verify recipient matches our gateway ID
+          if (to !== ownGatewayId) {
+            api.logger?.warn?.(`Threema webhook: 'to' (${to}) doesn't match gatewayId (${ownGatewayId})`);
+            res.writeHead(400, { "Content-Type": "text/plain" });
+            res.end("Invalid recipient");
+            return;
+          }
+
+          // 4. Validate date (not older than 10 minutes)
+          if (date) {
+            const msgTimestamp = parseInt(date, 10) * 1000; // Convert to ms
+            const now = Date.now();
+            const maxAge = 10 * 60 * 1000; // 10 minutes in ms
+            if (now - msgTimestamp > maxAge) {
+              api.logger?.warn?.(`Threema webhook: message too old (date=${date})`);
+              res.writeHead(400, { "Content-Type": "text/plain" });
+              res.end("Message too old");
+              return;
+            }
+          }
+
+          // 5. DM-Policy enforcement BEFORE decryption
+          if (dmPolicy === "disabled") {
+            api.logger?.info?.(`Threema DM policy: disabled, rejecting from=${from}`);
+            res.writeHead(403, { "Content-Type": "text/plain" });
+            res.end("DMs are disabled");
+            return;
+          }
+
+          if ((dmPolicy === "allowlist" || dmPolicy === "pairing") && allowFrom.length > 0) {
+            const normalizedFrom = normalizeThreemaTarget(from);
+            const normalizedAllowFrom = allowFrom.map(id => normalizeThreemaTarget(id));
+            if (!normalizedAllowFrom.includes(normalizedFrom)) {
+              api.logger?.info?.(`Threema DM policy: sender ${from} not in allowlist`);
+              res.writeHead(403, { "Content-Type": "text/plain" });
+              res.end("Sender not authorized");
+              return;
+            }
+          }
+
+          // === PROCESSING PHASE ===
 
           // Decrypt the message
           const senderPubKey = await client.getPublicKey(from);
@@ -1194,10 +1420,8 @@ export default function register(api: any) {
           const senderLabel = nickname || from;
 
           if (decrypted?.type === 0x01 && decrypted?.text) {
-            // Text message
-            api.logger?.info?.(
-              `Threema text from ${from} (${senderLabel}): ${decrypted.text}`
-            );
+            // Text message - don't log message content (log-redaction)
+            api.logger?.info?.(`Threema text from ${from}, type=0x01`);
 
             // Dispatch to OpenClaw via enqueueSystemEvent
             const enqueue = runtime?.system?.enqueueSystemEvent;
@@ -1212,9 +1436,7 @@ export default function register(api: any) {
                   accountId: "default",
                 },
               });
-              api.logger?.info?.(
-                "Threema message dispatched via enqueueSystemEvent"
-              );
+              api.logger?.info?.("Threema message dispatched via enqueueSystemEvent");
 
               // Wake the agent
               wakeAgent(config);
@@ -1222,10 +1444,10 @@ export default function register(api: any) {
               api.logger?.warn?.("enqueueSystemEvent not available");
             }
           } else if (decrypted?.type === 0x17 && decrypted?.fileMessage) {
-            // File message
+            // File message - log only metadata, not caption
             const fileMsg = decrypted.fileMessage;
             api.logger?.info?.(
-              `Threema file from ${from}: ${fileMsg.m} (${fileMsg.s} bytes)${fileMsg.d ? ` - "${fileMsg.d}"` : ""}`
+              `Threema file from ${from}: ${fileMsg.m} (${fileMsg.s} bytes)`
             );
 
             // Process the file: download, decrypt, save, maybe transcribe
@@ -1268,9 +1490,7 @@ export default function register(api: any) {
                   transcription: result?.transcription,
                 },
               });
-              api.logger?.info?.(
-                "Threema file message dispatched via enqueueSystemEvent"
-              );
+              api.logger?.info?.("Threema file message dispatched via enqueueSystemEvent");
 
               // Wake the agent
               wakeAgent(config);
@@ -1295,6 +1515,7 @@ export default function register(api: any) {
           res.writeHead(200, { "Content-Type": "text/plain" });
           res.end("OK");
         } catch (err: any) {
+          // Don't log full error details that might contain sensitive data
           api.logger?.error?.(`Threema webhook error: ${err.message}`);
           res.writeHead(500, { "Content-Type": "text/plain" });
           res.end("Internal Server Error");
@@ -1425,15 +1646,21 @@ export default function register(api: any) {
  */
 function wakeAgent(config: any) {
   const gatewayPort = config?.gateway?.port || 18789;
-  // Read hooks token from config file directly (config object may have redacted values)
-  let hooksToken: string | undefined;
-  try {
-    const rawConfig = JSON.parse(fs.readFileSync(
-      path.join(process.env.HOME || "/tmp", ".openclaw", "openclaw.json"), "utf8"
-    ));
-    hooksToken = rawConfig?.hooks?.token;
-  } catch {}
+  
+  // Try ENV first, fallback to config file (security: ENV is preferred)
+  let hooksToken: string | undefined = process.env.OPENCLAW_HOOKS_TOKEN;
+  
+  if (!hooksToken) {
+    try {
+      const rawConfig = JSON.parse(fs.readFileSync(
+        path.join(process.env.HOME || "/tmp", ".openclaw", "openclaw.json"), "utf8"
+      ));
+      hooksToken = rawConfig?.hooks?.token;
+    } catch {}
+  }
+  
   if (!hooksToken) return;
+  
   const wakeUrl = `http://127.0.0.1:${gatewayPort}/hooks/wake`;
   const wakeBody = JSON.stringify({
     text: "Threema message received",
@@ -1443,9 +1670,11 @@ function wakeAgent(config: any) {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${hooksToken}`,
   };
+  
   fetch(wakeUrl, { method: "POST", headers, body: wakeBody })
     .then(res => {
-      if (!res.ok) res.text().then(t => console.error(`[Threema] Wake failed: ${res.status} ${t}`));
+      // Don't log response body (log-redaction)
+      if (!res.ok) console.error(`[Threema] Wake failed: ${res.status}`);
     })
     .catch(err => console.error(`[Threema] Wake error: ${err.message}`));
 }
