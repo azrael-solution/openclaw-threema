@@ -992,11 +992,12 @@ async function processFileMessage(
     }
 
     // Download encrypted blob
-    logger?.info?.(`Downloading blob ${fileMsg.b} (${fileMsg.s} bytes)`);
+    logger?.info?.(`Downloading blob (${fileMsg.s} bytes)`);
+    logger?.debug?.(`Blob ID: ${fileMsg.b}`);
     const encryptedBlob = await client.downloadBlob(fileMsg.b);
 
     // Decrypt blob
-    logger?.info?.(`Decrypting blob with key`);
+    logger?.debug?.("Decrypting blob");
     const decryptedData = client.decryptBlob(encryptedBlob, fileMsg.k);
     if (!decryptedData) {
       logger?.error?.("Failed to decrypt blob");
@@ -1019,8 +1020,8 @@ async function processFileMessage(
 
     // Save to disk with restrictive permissions
     fs.writeFileSync(filePath, decryptedData, { mode: 0o600 });
-    logger?.debug?.(`Saved file: ${fileName}`);
     logger?.info?.(`Saved file (${fileMsg.m}, ${decryptedData.length} bytes)`);
+    logger?.debug?.(`Saved file: ${fileName}`);
 
     // Transcribe if audio
     let transcription: string | undefined;
@@ -1792,8 +1793,9 @@ export default function register(api: any) {
             api.logger?.debug?.(`Threema receipt from=${from}`);
           } else if (decrypted) {
             api.logger?.info?.(
-              `Threema message type 0x${decrypted.type.toString(16)} from ${from} (not yet supported)`
+              `Threema message type 0x${decrypted.type.toString(16)} (not yet supported)`
             );
+            api.logger?.debug?.(`Threema unsupported from=${from} messageId=${messageId}`);
           }
 
           res.writeHead(200, { "Content-Type": "text/plain" });

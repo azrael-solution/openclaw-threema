@@ -67,10 +67,12 @@ This outputs a NaCl key pair. Add the private key to your config and upload the 
 Set your Threema Gateway webhook URL to:
 
 ```
-https://your-host/hooks/threema/webhook
+https://your-host:18789/threema/webhook
 ```
 
-The plugin registers this endpoint automatically.
+The default port is `18789` (OpenClaw Gateway). The path matches `webhookPath` in your config (default: `/threema/webhook`).
+
+**Note:** If you're behind a reverse proxy, adjust the URL accordingly. The plugin registers the endpoint at the configured `webhookPath`.
 
 ### 3. Restart OpenClaw
 
