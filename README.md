@@ -4,17 +4,22 @@ Threema Gateway channel plugin for [OpenClaw](https://github.com/openclaw/opencl
 
 ## Features
 
-- 🔒 **End-to-end encrypted** text messaging (NaCl box)
-- 📸 **Media send/receive** — images, files, audio (E2E encrypted blobs)
-- 🎤 **Voice transcription** — automatic speech-to-text via local Whisper
-- ⚡ **Instant wake** — webhook-based message delivery (no polling)
-- 🛠️ **CLI tools** — `openclaw threema send|send-file|status|keygen`
+- **End-to-end encrypted** text messaging (NaCl box)
+- **Media send/receive** — images, files, audio (E2E encrypted blobs)
+- **Voice transcription** — automatic speech-to-text via local Whisper
+- **Instant wake** — webhook-based message delivery (no polling)
+- **CLI tools** — `openclaw threema send|send-file|status|keygen`
 
 ## Requirements
 
 - A [Threema Gateway](https://gateway.threema.ch/) account (E2E mode)
 - OpenClaw v0.30+ with channel plugin support
 - For voice transcription: [OpenAI Whisper](https://github.com/openai/whisper) installed locally
+
+Please keep in mind that the use of the Threema Gateway is not for free.
+At the time of writing these lines you have to pay 1.600 "Credits" to get an ID. 
+Every Message costs another Credit (roughly EUR 0,02).
+2.500 Credits are about EUR 55,00
 
 ## Installation
 
