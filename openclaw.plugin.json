@@ -6,7 +6,7 @@
   "channels": ["threema"],
   "configSchema": {
     "type": "object",
-    "additionalProperties": false,
+    "additionalProperties": true,
     "properties": {
       "enabled": {
         "type": "boolean",
@@ -30,10 +30,15 @@
         "description": "Webhook path for incoming messages",
         "default": "/threema/webhook"
       },
+      "webhookSecret": {
+        "type": "string",
+        "description": "Deprecated: HMAC verification now uses the Gateway secretKey. This field is ignored."
+      },
       "dmPolicy": {
         "type": "string",
-        "enum": ["allowlist", "open", "disabled"],
-        "default": "allowlist"
+        "enum": ["pairing", "allowlist", "open", "disabled"],
+        "default": "allowlist",
+        "description": "DM access control. 'pairing' is deprecated and treated as 'allowlist'."
       },
       "allowFrom": {
         "type": "array",
@@ -71,3 +76,4 @@
     }
   }
 }
+

@@ -24,7 +24,7 @@ interface ThreemaConfig {
   secretKey: string;
   privateKey?: string; // hex-encoded NaCl private key for E2E
   webhookPath?: string;
-  dmPolicy?: "allowlist" | "open" | "disabled";
+  dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   allowFrom?: string[];
   textChunkLimit?: number;
 }
@@ -1046,7 +1046,19 @@ async function processFileMessage(
 function getThreemaConfig(config: OpenClawConfig): ThreemaConfig | undefined {
   const channelCfg = config?.channels?.threema;
   const pluginCfg = config?.plugins?.entries?.threema?.config;
-  return channelCfg || pluginCfg;
+  const cfg = channelCfg || pluginCfg;
+  
+  if (!cfg) return undefined;
+  
+  // Migrate legacy config values
+  if ((cfg as any).dmPolicy === "pairing") {
+    cfg.dmPolicy = "allowlist";
+  }
+  
+  // Silently ignore removed fields (webhookSecret, etc.)
+  // They may still be present in user's openclaw.json
+  
+  return cfg;
 }
 
 /**
@@ -1562,23 +1574,24 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.4.3";
+export const version = "0.4.4";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
 export default function register(api: any) {
-  const config = api.config as OpenClawConfig;
-  const threemaCfg = getThreemaConfig(config);
-  const runtime = api.runtime;
+  try {
+    const config = api.config as OpenClawConfig;
+    const threemaCfg = getThreemaConfig(config);
+    const runtime = api.runtime;
 
-  // Register the channel plugin
-  api.registerChannel({ plugin: threemaChannel });
-  api.logger?.info?.("Threema channel plugin registered");
+    // Register the channel plugin
+    api.registerChannel({ plugin: threemaChannel });
+    api.logger?.info?.("Threema channel plugin registered");
 
   // Register webhook handler for incoming E2E messages
-  if (threemaCfg?.privateKey && threemaCfg?.webhookPath) {
+  if (threemaCfg?.privateKey) {
     const client = new ThreemaClient(threemaCfg);
-    const webhookPath = threemaCfg.webhookPath;
+    const webhookPath = threemaCfg.webhookPath ?? "/threema/webhook";
     const ownGatewayId = threemaCfg.gatewayId;
     const dmPolicy = threemaCfg.dmPolicy ?? "allowlist";
     const allowFrom = threemaCfg.allowFrom ?? [];
@@ -1925,6 +1938,10 @@ export default function register(api: any) {
   );
 
   api.logger?.info?.("Threema Gateway plugin loaded (with media support)");
+  } catch (err: any) {
+    api.logger?.error?.(`Threema plugin registration failed: ${err.message}`);
+    // Don't rethrow - let the gateway continue without Threema rather than crashing
+  }
 }
 
 /**
@@ -1964,3 +1981,4 @@ function wakeAgent(config: any) {
     })
     .catch(err => console.error(`[Threema] Wake error: ${err.message}`));
 }
+
