@@ -1,11 +1,13 @@
 {
   "name": "openclaw-threema",
-  "version": "0.4.6",
+  "version": "0.5.2",
   "description": "Threema Gateway channel plugin for OpenClaw",
   "type": "module",
   "main": "index.ts",
   "openclaw": {
-    "extensions": ["./index.ts"],
+    "extensions": [
+      "./index.ts"
+    ],
     "channel": {
       "id": "threema",
       "label": "Threema",
@@ -13,8 +15,11 @@
       "docsPath": "/channels/threema",
       "blurb": "Privacy-focused Swiss messenger via Threema Gateway API.",
       "order": 45,
-      "aliases": ["threema-gateway"]
-    }
+      "aliases": [
+        "threema-gateway"
+      ]
+    },
+    "id": "threema"
   },
   "dependencies": {
     "tweetnacl": "^1.0.3",
@@ -29,7 +34,14 @@
     "README.md",
     "LICENSE"
   ],
-  "keywords": ["openclaw", "threema", "messaging", "e2e", "privacy", "channel-plugin"],
+  "keywords": [
+    "openclaw",
+    "threema",
+    "messaging",
+    "e2e",
+    "privacy",
+    "channel-plugin"
+  ],
   "author": "aza",
   "license": "MIT",
   "repository": {
@@ -37,4 +49,3 @@
     "url": "https://github.com/azrael-solution/openclaw-threema"
   }
 }
-

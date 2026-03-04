@@ -2,8 +2,10 @@
   "id": "threema",
   "name": "Threema Gateway",
   "description": "Threema messaging channel via Threema Gateway API (E2E encrypted)",
-  "version": "0.4.4",
-  "channels": ["threema"],
+  "version": "0.5.1",
+  "channels": [
+    "threema"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": true,
@@ -36,13 +38,20 @@
       },
       "dmPolicy": {
         "type": "string",
-        "enum": ["pairing", "allowlist", "open", "disabled"],
+        "enum": [
+          "pairing",
+          "allowlist",
+          "open",
+          "disabled"
+        ],
         "default": "allowlist",
         "description": "DM access control. 'pairing' is deprecated and treated as 'allowlist'."
       },
       "allowFrom": {
         "type": "array",
-        "items": { "type": "string" },
+        "items": {
+          "type": "string"
+        },
         "description": "Allowed Threema IDs for DMs"
       },
       "textChunkLimit": {
@@ -51,7 +60,10 @@
         "description": "Max chars per message (Threema limit: 3500)"
       }
     },
-    "required": ["gatewayId", "secretKey"]
+    "required": [
+      "gatewayId",
+      "secretKey"
+    ]
   },
   "uiHints": {
     "gatewayId": {
@@ -76,4 +88,3 @@
     }
   }
 }
-

@@ -1109,6 +1109,28 @@ function getMimeFromPath(filePath: string): string {
 // Channel Plugin Definition
 // ============================================================================
 
+// Shared status updater — allows the webhook handler (registered outside the
+// channel adapter) to update the channel's health-monitor status on inbound events.
+// startAccount populates this; the webhook handler calls updateActivity().
+const channelStatus = {
+  _getStatus: null as (() => ChannelAccountSnapshot) | null,
+  _setStatus: null as ((s: ChannelAccountSnapshot) => void) | null,
+  bind(getStatus: () => ChannelAccountSnapshot, setStatus: (s: ChannelAccountSnapshot) => void) {
+    this._getStatus = getStatus;
+    this._setStatus = setStatus;
+  },
+  updateActivity() {
+    if (this._getStatus && this._setStatus) {
+      const now = Date.now();
+      this._setStatus({
+        ...this._getStatus(),
+        lastEventAt: now,
+        lastInboundAt: now,
+      });
+    }
+  },
+};
+
 const threemaChannel = {
   id: "threema" as const,
 
@@ -1532,7 +1554,7 @@ const threemaChannel = {
   // ============================================================================
   gateway: {
     startAccount: async (ctx: ChannelGatewayContext): Promise<void> => {
-      const { account, cfg, log, setStatus, getStatus } = ctx;
+      const { account, cfg, log, setStatus, getStatus, abortSignal } = ctx;
 
       if (!account.gatewayId || !account.secretKey) {
         log?.warn?.("Threema not configured - missing gatewayId or secretKey");
@@ -1549,12 +1571,37 @@ const threemaChannel = {
         log?.info?.(`E2E public key: ${client.ownPublicKey}`);
       }
 
+      // Bind shared status so the webhook handler can report activity
+      channelStatus.bind(getStatus, setStatus);
+
       setStatus({
         ...getStatus(),
         running: true,
         connected: true,
         lastConnectedAt: Date.now(),
+        lastEventAt: Date.now(),
       });
+
+      // Periodic health heartbeat — update lastEventAt every 15 min so the
+      // health-monitor doesn't think we're stuck (webhook channels are passive).
+      const heartbeatInterval = setInterval(() => {
+        setStatus({
+          ...getStatus(),
+          lastEventAt: Date.now(),
+        });
+      }, 15 * 60 * 1000);
+
+      // Keep the promise alive until abortSignal fires — resolving immediately
+      // causes the gateway to treat the channel as "exited" and restart it.
+      await new Promise<void>((resolve) => {
+        if (abortSignal.aborted) return resolve();
+        abortSignal.addEventListener("abort", () => {
+          clearInterval(heartbeatInterval);
+          resolve();
+        }, { once: true });
+      });
+
+      log?.info?.("Threema Gateway stopped via abort signal");
     },
 
     stopAccount: async (ctx: ChannelGatewayContext): Promise<void> => {
@@ -1575,7 +1622,7 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.4.4";
+export const version = "0.5.2";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -1584,6 +1631,12 @@ export default function register(api: any) {
     const config = api.config as OpenClawConfig;
     const threemaCfg = getThreemaConfig(config);
     const runtime = api.runtime;
+
+    // Store runtime reference for wakeAgent() to use requestHeartbeatNow
+    _runtimeApi = runtime;
+
+    // Debug: check if requestHeartbeatNow is available
+    api.logger?.info?.(`Threema wake API: runtime.system.requestHeartbeatNow=${typeof runtime?.system?.requestHeartbeatNow}`);
 
     // Register the channel plugin
     api.registerChannel({ plugin: threemaChannel });
@@ -1597,17 +1650,19 @@ export default function register(api: any) {
     const dmPolicy = threemaCfg.dmPolicy ?? "allowlist";
     const allowFrom = threemaCfg.allowFrom ?? [];
 
-    api.registerHttpRoute?.({
-      path: webhookPath,
-      handler: async (req: any, res: any) => {
-        // Only accept POST requests
-        if (req.method !== "POST") {
-          res.writeHead(405, { "Content-Type": "text/plain" });
-          res.end("Method Not Allowed");
-          return;
-        }
+    // Webhook handler — Threema's API POSTs without our gateway token,
+    // so we need an unauthenticated route. The webhook has its own MAC-based auth.
+    //
+    // Forward-compatible: use registerHttpRoute with auth:"none" (2026.3.2+),
+    // fall back to registerHttpHandler for 2026.3.1.
+    const webhookHandler = async (req: any, res: any): Promise<void> => {
+      if (req.method !== "POST") {
+        res.writeHead(405, { "Content-Type": "text/plain" });
+        res.end("Method Not Allowed");
+        return;
+      }
 
-        try {
+      try {
           // Parse body with size limit (128KB max)
           let body: any;
           try {
@@ -1657,11 +1712,13 @@ export default function register(api: any) {
             return;
           }
 
-          // 4. Validate date (not older than 10 minutes)
+          // 4. Validate date (not older than 60 minutes)
+          // Threema retries delivery on webhook errors, so messages can arrive late.
+          // 60 min is generous enough for retries while still rejecting stale replays.
           if (date) {
             const msgTimestamp = parseInt(date, 10) * 1000; // Convert to ms
             const now = Date.now();
-            const maxAge = 10 * 60 * 1000; // 10 minutes in ms
+            const maxAge = 60 * 60 * 1000; // 60 minutes in ms
             if (now - msgTimestamp > maxAge) {
               api.logger?.warn?.(`Threema webhook: message too old (date=${date})`);
               res.writeHead(400, { "Content-Type": "text/plain" });
@@ -1706,6 +1763,9 @@ export default function register(api: any) {
           }
 
           // === PROCESSING PHASE ===
+
+          // Report activity to health-monitor (prevents "stuck" restarts)
+          channelStatus.updateActivity();
 
           // Decrypt the message
           const senderPubKey = await client.getPublicKey(from);
@@ -1817,12 +1877,42 @@ export default function register(api: any) {
         } catch (err: any) {
           // Don't log full error details that might contain sensitive data
           api.logger?.error?.(`Threema webhook error: ${err.message}`);
-          res.writeHead(500, { "Content-Type": "text/plain" });
-          res.end("Internal Server Error");
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "text/plain" });
+            res.end("Internal Server Error");
+          }
         }
-      },
-    });
-    api.logger?.info?.(`Threema webhook registered at ${webhookPath}`);
+        return;
+    };
+
+    // Register the webhook — Threema's callback server POSTs without our
+    // gateway auth token, so we need an unauthenticated route.
+    //
+    // Strategy: prefer registerHttpHandler (available in 2026.3.1, removed in 2026.3.2)
+    // because it bypasses gateway auth. Fall back to registerHttpRoute with auth:"none"
+    // (supported from 2026.3.2+). The order matters: registerHttpRoute in 2026.3.1
+    // silently ignores auth:"none" and applies gateway auth, breaking external webhooks.
+    if (api.registerHttpHandler) {
+      // 2026.3.1: registerHttpHandler with manual path matching (no gateway auth)
+      api.registerHttpHandler(async (req: any, res: any): Promise<boolean> => {
+        const url = new URL(req.url ?? "/", "http://localhost");
+        if (url.pathname !== webhookPath) return false;
+        await webhookHandler(req, res);
+        return true;
+      });
+      api.logger?.info?.(`Threema webhook registered via registerHttpHandler at ${webhookPath}`);
+    } else if (api.registerHttpRoute) {
+      // 2026.3.2+: registerHttpHandler removed, use registerHttpRoute with auth:"plugin"
+      // auth:"plugin" = no gateway auth, plugin handles its own auth (MAC verification)
+      api.registerHttpRoute({
+        path: webhookPath,
+        auth: "plugin",
+        handler: webhookHandler,
+      });
+      api.logger?.info?.(`Threema webhook registered via registerHttpRoute (auth:plugin) at ${webhookPath}`);
+    } else {
+      api.logger?.error?.("No HTTP registration method available — Threema webhook NOT registered!");
+    }
   }
 
   // Register CLI commands
@@ -1948,10 +2038,21 @@ export default function register(api: any) {
 /**
  * Wake the agent to process new messages
  */
+// Shared reference to runtime API — set during register(), used by wakeAgent()
+let _runtimeApi: any = null;
+
 function wakeAgent(config: any) {
+  // Prefer the new requestHeartbeatNow API (2026.3.2+) — direct, no HTTP roundtrip
+  if (_runtimeApi?.system?.requestHeartbeatNow) {
+    try {
+      _runtimeApi.system.requestHeartbeatNow({ sessionKey: "agent:main:main" });
+      return;
+    } catch {}
+  }
+
+  // Fallback: HTTP wake call for older versions
   const gatewayPort = config?.gateway?.port || 18789;
   
-  // Try ENV first, fallback to config file (security: ENV is preferred)
   let hooksToken: string | undefined = process.env.OPENCLAW_HOOKS_TOKEN;
   
   if (!hooksToken) {
