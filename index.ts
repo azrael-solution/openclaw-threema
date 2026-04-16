@@ -1622,7 +1622,7 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.5.2";
+export const version = "0.6.0";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -1782,25 +1782,138 @@ export default function register(api: any) {
             api.logger?.info?.("Threema text message received");
             api.logger?.debug?.(`Threema text from=${from} messageId=${messageId}`);
 
-            // Dispatch to OpenClaw via enqueueSystemEvent
-            const enqueue = runtime?.system?.enqueueSystemEvent;
-            if (enqueue) {
-              const envelope = `[Threema message from ${senderLabel} (${from})]\n${decrypted.text}`;
-              enqueue(envelope, {
-                sessionKey: "agent:main:main",
-                deliveryContext: {
-                  channel: "threema",
-                  to: from,
-                  from: from,
-                  accountId: "default",
-                },
-              });
-              api.logger?.info?.("Threema message dispatched via enqueueSystemEvent");
+            // Dispatch through the proper Channel Inbound Pipeline
+            // This enables slash-command parsing (/status, /compact, etc.)
+            const channelRuntime = runtime?.channel;
+            if (channelRuntime?.routing?.resolveAgentRoute && channelRuntime?.reply?.finalizeInboundContext && channelRuntime?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
+              try {
+                const currentCfg = runtime.config.loadConfig();
 
-              // Wake the agent
-              wakeAgent(config);
+                // 1. Resolve the agent route and session key
+                const route = channelRuntime.routing.resolveAgentRoute({
+                  cfg: currentCfg,
+                  channel: "threema",
+                  accountId: "default",
+                  peer: { kind: "direct", id: from },
+                });
+
+                const sessionKey = channelRuntime.routing.buildAgentSessionKey({
+                  agentId: route.agentId,
+                  channel: "threema",
+                  accountId: "default",
+                  peer: { kind: "direct", id: from },
+                  dmScope: "per-account-channel-peer",
+                });
+
+                // 2. Check if sender is command-authorized (in allowFrom list)
+                const senderAllowed = allowFrom.length === 0 || allowFrom.includes(from);
+
+                // 3. Build the finalized inbound context
+                const msgCtx = channelRuntime.reply.finalizeInboundContext({
+                  Body: decrypted.text,
+                  RawBody: decrypted.text,
+                  CommandBody: decrypted.text,
+                  From: `threema:${from}`,
+                  To: `threema:${ownGatewayId}`,
+                  SessionKey: sessionKey,
+                  AccountId: "default",
+                  OriginatingChannel: "threema",
+                  OriginatingTo: `threema:${from}`,
+                  ChatType: "direct" as const,
+                  SenderName: senderLabel,
+                  SenderId: from,
+                  Provider: "threema",
+                  Surface: "threema",
+                  ConversationLabel: senderLabel || from,
+                  Timestamp: Date.now(),
+                  CommandAuthorized: senderAllowed,
+                });
+
+                // 4. Dispatch through the full pipeline (command parsing + agent)
+                const replyClient = new ThreemaClient(getThreemaConfig(currentCfg)!);
+                await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
+                  ctx: msgCtx,
+                  cfg: currentCfg,
+                  dispatcherOptions: {
+                    deliver: async (payload: any) => {
+                      const text = payload.text ?? payload.body;
+                      if (!text) return;
+                      // Chunk long replies if needed
+                      const limit = getThreemaConfig(currentCfg)?.textChunkLimit ?? 3500;
+                      if (text.length <= limit) {
+                        if (replyClient.isE2EEnabled) {
+                          await replyClient.sendE2E(from, text);
+                        } else {
+                          await replyClient.sendSimple(from, text);
+                        }
+                      } else {
+                        // Split into chunks at newline boundaries
+                        const chunks: string[] = [];
+                        let remaining = text;
+                        while (remaining.length > 0) {
+                          if (remaining.length <= limit) {
+                            chunks.push(remaining);
+                            break;
+                          }
+                          let splitIdx = remaining.lastIndexOf("\n", limit);
+                          if (splitIdx <= 0) splitIdx = limit;
+                          chunks.push(remaining.slice(0, splitIdx));
+                          remaining = remaining.slice(splitIdx).replace(/^\n/, "");
+                        }
+                        for (const chunk of chunks) {
+                          if (replyClient.isE2EEnabled) {
+                            await replyClient.sendE2E(from, chunk);
+                          } else {
+                            await replyClient.sendSimple(from, chunk);
+                          }
+                        }
+                      }
+                    },
+                    onReplyStart: () => {
+                      api.logger?.info?.(`Threema: agent reply started for ${from}`);
+                    },
+                  },
+                });
+                api.logger?.info?.("Threema message dispatched via Channel Inbound Pipeline");
+              } catch (pipelineErr: any) {
+                api.logger?.error?.(`Threema inbound pipeline error: ${pipelineErr.message}`);
+                // Fallback to enqueueSystemEvent if pipeline fails
+                const enqueue = runtime?.system?.enqueueSystemEvent;
+                if (enqueue) {
+                  const envelope = `[Threema message from ${senderLabel} (${from})]\n${decrypted.text}`;
+                  enqueue(envelope, {
+                    sessionKey: "agent:main:main",
+                    deliveryContext: {
+                      channel: "threema",
+                      to: from,
+                      from: from,
+                      accountId: "default",
+                    },
+                  });
+                  api.logger?.info?.("Threema message dispatched via enqueueSystemEvent (fallback)");
+                  wakeAgent(config);
+                }
+              }
             } else {
-              api.logger?.warn?.("enqueueSystemEvent not available");
+              // Fallback: use enqueueSystemEvent if channel runtime not available
+              api.logger?.warn?.("Channel inbound pipeline not available, falling back to enqueueSystemEvent");
+              const enqueue = runtime?.system?.enqueueSystemEvent;
+              if (enqueue) {
+                const envelope = `[Threema message from ${senderLabel} (${from})]\n${decrypted.text}`;
+                enqueue(envelope, {
+                  sessionKey: "agent:main:main",
+                  deliveryContext: {
+                    channel: "threema",
+                    to: from,
+                    from: from,
+                    accountId: "default",
+                  },
+                });
+                api.logger?.info?.("Threema message dispatched via enqueueSystemEvent (legacy)");
+                wakeAgent(config);
+              } else {
+                api.logger?.warn?.("Neither channel pipeline nor enqueueSystemEvent available");
+              }
             }
           } else if (decrypted?.type === 0x17 && decrypted?.fileMessage) {
             // File message - PII only on debug level
