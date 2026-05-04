@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.5 (2026-05-04)
+
+### Added
+- **Voice-Reply Function**: Threema plugin now supports sending voice notes (audio messages).
+  - New `sendVoiceNote(toId, audioBuffer, mimeType, caption)` method on ThreemaClient for E2E encrypted voice messages.
+  - When agent reply contains `audioAsVoice: true` with a `mediaUrl` (e.g., TTS or Whisper output), the plugin automatically sends it as a voice message instead of text.
+  - Audio detection works in both text-inbound and file-inbound reply pipelines.
+  - Fallback to text mode when audio file not found or when E2E mode is disabled (voice notes require E2E).
+  - Supports multiple audio MIME types: audio/aac, audio/mpeg, audio/wav, audio/ogg, audio/m4a, audio/webm.
+  - Error handling: logs errors and gracefully falls back to text delivery if voice send fails.
+
 ## 0.6.4 (2026-05-04)
 
 ### Fixed

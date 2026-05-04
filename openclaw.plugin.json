@@ -2,7 +2,7 @@
   "id": "threema",
   "name": "Threema Gateway",
   "description": "Threema messaging channel via Threema Gateway API (E2E encrypted)",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "channels": [
     "threema"
   ],
