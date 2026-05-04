@@ -2121,11 +2121,24 @@ export default function register(api: any) {
             // session, runs the agent in-context, and lets us reply via
             // dispatchReplyWithBufferedBlockDispatcher just like text.
             const channelRuntime = runtime?.channel;
-            if (channelRuntime?.reply?.finalizeInboundContext
+            if (channelRuntime?.routing?.resolveAgentRoute
+                && channelRuntime?.routing?.buildAgentSessionKey
+                && channelRuntime?.reply?.finalizeInboundContext
                 && channelRuntime?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
               try {
                 const currentCfg = runtime.config.loadConfig();
-                const sessionKey = channelRuntime.reply.resolveDirectSessionKey({
+
+                // Resolve the same agent route + session key the text path uses
+                // so file inbounds end up in the live Threema DM session.
+                const route = channelRuntime.routing.resolveAgentRoute({
+                  cfg: currentCfg,
+                  channel: "threema",
+                  accountId: "default",
+                  peer: { kind: "direct", id: from },
+                });
+
+                const sessionKey = channelRuntime.routing.buildAgentSessionKey({
+                  agentId: route.agentId,
                   channel: "threema",
                   accountId: "default",
                   peer: { kind: "direct", id: from },

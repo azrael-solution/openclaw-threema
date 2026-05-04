@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.4 (2026-05-04)
+
+### Fixed
+- v0.6.3 introduced a regression where file inbounds always fell back to
+  the legacy `enqueueSystemEvent` path. The new pipeline branch was
+  trying to call a non-existent `channelRuntime.reply.resolveDirectSession-
+  Key`. The text path doesn't use that helper at all; it uses
+  `channelRuntime.routing.resolveAgentRoute` + `buildAgentSessionKey`.
+  This release applies the same approach to the file path, so file
+  inbounds finally land in the live Threema DM session.
+- Symptom: `Threema file inbound pipeline error: channelRuntime.reply.
+  resolveDirectSessionKey is not a function` followed by
+  `dispatched via enqueueSystemEvent (fallback)` for every file message.
+
 ## 0.6.3 (2026-05-04)
 
 ### Fixed
