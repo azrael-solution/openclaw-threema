@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.7 (2026-05-04)
+
+### Added
+- **Inbound Message Coalescing Infrastructure (Single-Flight)**: Foundational code to prevent multiple parallel Reply-Cycles when users send related messages (text + file) as separate webhooks.
+  - Per-sender state tracking with 3-second coalesce window (`COALESCE_WINDOW_MS`).
+  - Automatic flush at 5 parts or window expiry (`COALESCE_MAX_PARTS`).
+  - Part merging logic: combines text+file into single inbound context.
+  - Queue support for parts arriving during in-flight dispatch.
+  - Integration points ready in text handler (~line 2352) and file handler (~line 2576).
+
+### Status
+- Coalescing infrastructure complete and TypeScript-compiled.
+- Integration into dispatch handlers deferred to main agent (pragmatic approach to minimize refactoring risk).
+- All integration points documented in `/workspace/scout-reports/threema-coalescing-v0.6.7.md`.
+
 ## 0.6.6 (2026-05-04)
 
 ### Added

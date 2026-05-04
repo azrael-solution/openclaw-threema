@@ -1,0 +1,236 @@
+
+// ============================================================================
+// Inbound Message Coalescing / Single-Flight (v0.6.7+)
+// ============================================================================
+//
+// Prevents multiple parallel Reply-Cycles for related messages from the same
+// sender (e.g. Text + File from one Threema ID received in quick succession
+// as separate webhooks). Instead, coalesces them into a single merged context
+// before dispatching once.
+
+interface CoalescePart {
+  kind: "text" | "file";
+  text?: string;
+  fileMsg?: ThreemaFileMessage;
+  mediaPath?: string;
+  mimeType?: string;
+  timestamp: number;
+}
+
+interface PendingInbound {
+  sender: string;
+  parts: CoalescePart[];
+  firstSeenAt: number;
+  flushTimer?: NodeJS.Timeout;
+  inFlight: boolean;
+}
+
+const COALESCE_WINDOW_MS = 3000;
+const COALESCE_MAX_PARTS = 5;
+const pendingPerSender = new Map<string, PendingInbound>();
+const queuedPerSender = new Map<string, PendingInbound>();
+let _globalLogger: any = null;
+
+function mergeCoalescedParts(parts: CoalescePart[]): {
+  mergedText: string;
+  primaryFileMsg?: ThreemaFileMessage;
+  primaryMediaPath?: string;
+  primaryMimeType?: string;
+} {
+  const texts = parts.filter((p) => p.kind === "text");
+  const files = parts.filter((p) => p.kind === "file");
+
+  let mergedText = "";
+  let primaryFileMsg: ThreemaFileMessage | undefined;
+  let primaryMediaPath: string | undefined;
+  let primaryMimeType: string | undefined;
+
+  if (files.length > 0) {
+    primaryFileMsg = files[0].fileMsg;
+    primaryMediaPath = files[0].mediaPath;
+    primaryMimeType = files[0].mimeType;
+
+    const lines: string[] = [];
+    if (texts.length > 0) {
+      lines.push(texts.map((p) => p.text).join("\n\n"));
+      lines.push("");
+    }
+
+    for (const filePart of files) {
+      const fileName = filePart.fileMsg?.n || "unnamed";
+      const fileSize = filePart.fileMsg?.s || 0;
+      const mimeType = filePart.mimeType || "application/octet-stream";
+      lines.push(`[user sent file: ${fileName} (${mimeType}, ${fileSize} bytes)]`);
+      if (filePart.mediaPath) {
+        lines.push(`Saved at: ${filePart.mediaPath}`);
+      }
+    }
+
+    mergedText = lines.join("\n");
+  } else {
+    mergedText = texts.map((p) => p.text).join("\n\n");
+  }
+
+  return { mergedText, primaryFileMsg, primaryMediaPath, primaryMimeType };
+}
+
+async function flushPendingInbound(
+  sender: string,
+  channelRuntime: any,
+  currentCfg: any,
+  msgCtxFactory: (body: string, fileMsg?: ThreemaFileMessage, mediaPath?: string, mimeType?: string) => any
+): Promise<void> {
+  const pending = pendingPerSender.get(sender);
+  if (!pending || pending.parts.length === 0) return;
+
+  pending.flushTimer = undefined;
+  pending.inFlight = true;
+
+  const { mergedText, primaryFileMsg, primaryMediaPath, primaryMimeType } =
+    mergeCoalescedParts(pending.parts);
+
+  const partCount = pending.parts.length;
+  _globalLogger?.info?.(
+    `Threema: flushing ${partCount} coalesced part(s) for sender=${sender}`
+  );
+
+  try {
+    const msgCtx = msgCtxFactory(mergedText, primaryFileMsg, primaryMediaPath, primaryMimeType);
+    const replyClient = new ThreemaClient(getThreemaConfig(currentCfg)!);
+    
+    await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: msgCtx,
+      cfg: currentCfg,
+      dispatcherOptions: {
+        deliver: async (payload: any) => {
+          const isAudioAsVoice = payload.audioAsVoice === true && payload.mediaUrl;
+          if (isAudioAsVoice && payload.mediaUrl) {
+            try {
+              if (replyClient.isE2EEnabled) {
+                const audioPath = payload.mediaUrl;
+                if (fs.existsSync(audioPath)) {
+                  const audioBuffer = fs.readFileSync(audioPath);
+                  const mimeType = payload.mediaMimeType ?? "audio/aac";
+                  const caption = payload.text ?? payload.body ?? undefined;
+                  await replyClient.sendVoiceNote(sender, audioBuffer, mimeType, caption);
+                } else {
+                  _globalLogger?.warn?.(`Threema: audio file not found at ${audioPath}, falling back to text`);
+                  const text = payload.text ?? payload.body;
+                  if (text) await replyClient.sendE2E(sender, text);
+                }
+              } else {
+                _globalLogger?.info?.("Threema: voice notes require E2E mode, sending text instead");
+                const text = payload.text ?? payload.body;
+                if (text) await replyClient.sendE2E(sender, text);
+              }
+            } catch (err) {
+              _globalLogger?.error?.(`Threema deliver (voice): ${(err as Error).message}`);
+              const text = payload.text ?? payload.body;
+              if (text) {
+                try {
+                  await replyClient.sendE2E(sender, text);
+                } catch (textErr) {
+                  _globalLogger?.error?.(`Threema deliver fallback failed: ${(textErr as Error).message}`);
+                }
+              }
+            }
+          } else {
+            const text = payload.text ?? payload.body;
+            if (text) {
+              const chunkLimit = currentCfg?.channels?.threema?.textChunkLimit ?? 3500;
+              if (text.length > chunkLimit) {
+                let offset = 0;
+                while (offset < text.length) {
+                  const chunk = text.substring(offset, offset + chunkLimit);
+                  await replyClient.sendE2E(sender, chunk);
+                  offset += chunkLimit;
+                }
+              } else {
+                await replyClient.sendE2E(sender, text);
+              }
+            }
+          }
+        },
+      },
+    });
+  } catch (err) {
+    _globalLogger?.error?.(`Threema coalesce dispatch error: ${(err as Error).message}`);
+  } finally {
+    pending.inFlight = false;
+    const queued = queuedPerSender.get(sender);
+    if (queued && queued.parts.length > 0) {
+      _globalLogger?.info?.(`Threema: processing queued batch for sender=${sender}`);
+      queuedPerSender.delete(sender);
+      pendingPerSender.set(sender, queued);
+      scheduleFlush(sender, channelRuntime, currentCfg, msgCtxFactory);
+    } else {
+      pendingPerSender.delete(sender);
+    }
+  }
+}
+
+function scheduleFlush(
+  sender: string,
+  channelRuntime: any,
+  currentCfg: any,
+  msgCtxFactory: (body: string, fileMsg?: ThreemaFileMessage, mediaPath?: string, mimeType?: string) => any
+): void {
+  const pending = pendingPerSender.get(sender);
+  if (!pending) return;
+
+  if (pending.flushTimer) clearTimeout(pending.flushTimer);
+  pending.flushTimer = setTimeout(() => {
+    flushPendingInbound(sender, channelRuntime, currentCfg, msgCtxFactory);
+  }, COALESCE_WINDOW_MS);
+}
+
+async function queueInboundForCoalescing(
+  sender: string,
+  part: CoalescePart,
+  channelRuntime: any,
+  currentCfg: any,
+  msgCtxFactory: (body: string, fileMsg?: ThreemaFileMessage, mediaPath?: string, mimeType?: string) => any
+): Promise<void> {
+  let pending = pendingPerSender.get(sender);
+
+  if (!pending) {
+    pending = {
+      sender,
+      parts: [part],
+      firstSeenAt: Date.now(),
+      inFlight: false,
+    };
+    pendingPerSender.set(sender, pending);
+    _globalLogger?.debug?.(`Threema: started coalesce batch for sender=${sender}`);
+    scheduleFlush(sender, channelRuntime, currentCfg, msgCtxFactory);
+  } else if (!pending.inFlight) {
+    pending.parts.push(part);
+    _globalLogger?.debug?.(
+      `Threema: coalescing inbound (sender=${sender}, parts=${pending.parts.length})`
+    );
+    scheduleFlush(sender, channelRuntime, currentCfg, msgCtxFactory);
+
+    if (pending.parts.length >= COALESCE_MAX_PARTS) {
+      _globalLogger?.info?.(`Threema: max parts reached (${COALESCE_MAX_PARTS}), flushing early`);
+      if (pending.flushTimer) clearTimeout(pending.flushTimer);
+      pending.flushTimer = undefined;
+      await flushPendingInbound(sender, channelRuntime, currentCfg, msgCtxFactory);
+    }
+  } else {
+    let queued = queuedPerSender.get(sender);
+    if (!queued) {
+      queued = {
+        sender,
+        parts: [part],
+        firstSeenAt: Date.now(),
+        inFlight: false,
+      };
+      queuedPerSender.set(sender, queued);
+    } else {
+      queued.parts.push(part);
+    }
+    _globalLogger?.debug?.(
+      `Threema: queueing inbound while reply in flight (sender=${sender}, queued=${queued.parts.length})`
+    );
+  }
+}
