@@ -476,7 +476,8 @@ class ThreemaClient {
    */
   async uploadBlob(encryptedData: Uint8Array): Promise<string> {
     const formData = new FormData();
-    formData.append("blob", new Blob([encryptedData]), "blob");
+    // Cast to ArrayBuffer to satisfy strict TS DOM types (Uint8Array<ArrayBufferLike> vs ArrayBufferView<ArrayBuffer>)
+    formData.append("blob", new Blob([encryptedData as unknown as BlobPart]), "blob");
 
     const url = `${THREEMA_API_BASE}/upload_blob?from=${this.gatewayId}&secret=${this.secretKey}`;
 
@@ -1737,7 +1738,7 @@ const threemaChannel = {
         connected: true,
         lastConnectedAt: Date.now(),
         lastEventAt: Date.now(),
-      });
+      } as any);
 
       // Periodic health heartbeat — update lastEventAt every 15 min so the
       // health-monitor doesn't think we're stuck (webhook channels are passive).
@@ -1745,7 +1746,7 @@ const threemaChannel = {
         setStatus({
           ...getStatus(),
           lastEventAt: Date.now(),
-        });
+        } as any);
       }, 15 * 60 * 1000);
 
       // Keep the promise alive until abortSignal fires — resolving immediately

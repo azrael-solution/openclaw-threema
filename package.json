@@ -1,12 +1,22 @@
 {
   "name": "openclaw-threema",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Threema Gateway channel plugin for OpenClaw",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "rm -rf dist && tsc -p tsconfig.json"
+  },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ],
     "channel": {
       "id": "threema",
@@ -24,7 +34,7 @@
       "pluginApi": ">=1.0.0"
     },
     "build": {
-      "openclawVersion": "2026.3.28"
+      "openclawVersion": "2026.5.3"
     }
   },
   "dependencies": {
@@ -32,12 +42,15 @@
     "tweetnacl-util": "^0.15.1"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "@types/node": "^22.0.0"
   },
   "files": [
+    "dist/",
     "index.ts",
     "openclaw.plugin.json",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "keywords": [

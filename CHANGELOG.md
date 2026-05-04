@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.2 (2026-05-04)
+
+### Fixed
+- **Compiled runtime output** for the OpenClaw 2026.5.x npm-first plugin loader.
+  The package now ships `dist/index.js` and points `main`/`exports`/
+  `openclaw.extensions` at the compiled output. Previous releases shipped
+  the raw `index.ts` only, which OpenClaw 2026.5.0+ rejects with:
+  *"installed plugin package requires compiled runtime output for
+  TypeScript entry index.ts"*.
+- Added `tsconfig.json`, a `build`/`prepublishOnly` script, and `.npmignore`
+  so future releases always include `dist/` and exclude `node_modules`.
+- Cleaned a couple of strict-mode TypeScript signal-noise issues so the
+  package builds cleanly with `@types/node@22` on Node 22.
+
+### Added
+- **`channelConfigs.threema` metadata** in `openclaw.plugin.json`. The
+  2026.5.x setup surfaces and config schema engine read this; without it,
+  doctor logs:
+  *"channel plugin manifest declares threema without channelConfigs
+  metadata"*. The previous flat `configSchema` is preserved for older
+  OpenClaw versions.
+- `build.openclawVersion` bumped to `2026.5.3`.
+
 ## 0.6.1 (2026-05-04)
 
 ### Added
