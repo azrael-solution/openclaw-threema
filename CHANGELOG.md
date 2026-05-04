@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.3 (2026-05-04)
+
+### Fixed
+- **File messages now route through the Channel Inbound Pipeline** like text
+  messages, so they appear as part of the same Threema DM conversation
+  the agent is already in. Previously file inbounds were dispatched via
+  legacy `enqueueSystemEvent` against `agent:main:main`, which left them
+  invisible to the running DM session: the agent only learned about the
+  file by chance (e.g. by greping the inbound media folder later).
+  Symptom hit on 2026-05-04 when the user shipped the OpenClaw
+  2026.5.3 update protocol as a `.txt` file and the agent did not see it
+  for ~20 minutes.
+
+### Added
+- File inbounds now expose `MediaPath` / `MediaType` / `MediaUrl` to the
+  agent context (matching the convention used by the Matrix channel
+  plugin). The agent can read the saved file directly with its normal
+  tools (read / pdf / image) and reply in the same DM thread.
+- The memory briefing block is now also injected into file inbounds, so
+  the agent's acute-state context applies regardless of whether the
+  user sent text or a file.
+- Voice notes (audio file messages) get the same treatment: the
+  Whisper transcription is included in the body, the audio path in
+  `MediaPath`.
+
+### Compatibility
+- Falls back to the legacy `enqueueSystemEvent` path on older OpenClaw
+  runtimes that don't expose `channelRuntime.reply.finalizeInboundContext`,
+  or whenever the new pipeline path throws.
+
 ## 0.6.2 (2026-05-04)
 
 ### Fixed

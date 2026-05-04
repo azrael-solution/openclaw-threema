@@ -2093,42 +2093,157 @@ export default function register(api: any) {
               api.logger
             );
 
-            // Dispatch to OpenClaw
-            const enqueue = runtime?.system?.enqueueSystemEvent;
-            if (enqueue) {
-              let envelope = `[Threema file from ${senderLabel} (${from})]`;
-
-              if (fileMsg.d) {
-                envelope += `\nCaption: ${fileMsg.d}`;
+            // Build a body summarising the inbound file. The actual binary
+            // lives at result.filePath; we expose it via MediaPath so the
+            // agent can read/inspect it with its normal tools (read/pdf/image).
+            const fileLines: string[] = [];
+            const fileLabel = fileMsg.n || "unnamed";
+            const fileMime = fileMsg.m || "application/octet-stream";
+            const fileSize = typeof fileMsg.s === "number" ? `${fileMsg.s} bytes` : "unknown size";
+            if (fileMsg.d) {
+              fileLines.push(fileMsg.d);
+            }
+            fileLines.push(`[user sent file: ${fileLabel} (${fileMime}, ${fileSize})]`);
+            if (result?.filePath) {
+              fileLines.push(`Saved at: ${result.filePath}`);
+              if (result.transcription) {
+                fileLines.push("");
+                fileLines.push("🎤 Audio transcription:");
+                fileLines.push(result.transcription);
               }
+            } else {
+              fileLines.push("⚠️ Failed to download/decrypt file");
+            }
+            const fileBody = fileLines.join("\n");
 
-              envelope += `\nFile: ${fileMsg.n || "unnamed"} (${fileMsg.m}, ${fileMsg.s} bytes)`;
-
-              if (result?.filePath) {
-                envelope += `\nSaved to: ${result.filePath}`;
-
-                if (result.transcription) {
-                  envelope += `\n\n🎤 Audio transcription:\n${result.transcription}`;
-                }
-              } else {
-                envelope += `\n⚠️ Failed to download/decrypt file`;
-              }
-
-              enqueue(envelope, {
-                sessionKey: "agent:main:main",
-                deliveryContext: {
+            // Try the Channel Inbound Pipeline first (same path as text
+            // messages). This routes the inbound to the existing Threema DM
+            // session, runs the agent in-context, and lets us reply via
+            // dispatchReplyWithBufferedBlockDispatcher just like text.
+            const channelRuntime = runtime?.channel;
+            if (channelRuntime?.reply?.finalizeInboundContext
+                && channelRuntime?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
+              try {
+                const currentCfg = runtime.config.loadConfig();
+                const sessionKey = channelRuntime.reply.resolveDirectSessionKey({
                   channel: "threema",
-                  to: from,
-                  from: from,
                   accountId: "default",
-                  mediaPath: result?.filePath,
-                  transcription: result?.transcription,
-                },
-              });
-              api.logger?.info?.("Threema file message dispatched via enqueueSystemEvent");
+                  peer: { kind: "direct", id: from },
+                  dmScope: "per-account-channel-peer",
+                });
 
-              // Wake the agent
-              wakeAgent(config);
+                const senderAllowed = allowFrom.length === 0 || allowFrom.includes(from);
+
+                const bodyForAgent = composeBodyForAgent(fileBody, currentCfg);
+                const fileCtx = channelRuntime.reply.finalizeInboundContext({
+                  Body: fileBody,
+                  RawBody: fileBody,
+                  CommandBody: fileMsg.d || "",
+                  BodyForAgent: bodyForAgent,
+                  From: `threema:${from}`,
+                  To: `threema:${ownGatewayId}`,
+                  SessionKey: sessionKey,
+                  AccountId: "default",
+                  OriginatingChannel: "threema",
+                  OriginatingTo: `threema:${from}`,
+                  ChatType: "direct" as const,
+                  SenderName: senderLabel,
+                  SenderId: from,
+                  Provider: "threema",
+                  Surface: "threema",
+                  ConversationLabel: senderLabel || from,
+                  Timestamp: Date.now(),
+                  CommandAuthorized: senderAllowed,
+                  MediaPath: result?.filePath,
+                  MediaUrl: result?.filePath,
+                  MediaType: fileMime,
+                  MessageSid: messageId,
+                });
+
+                const replyClient = new ThreemaClient(getThreemaConfig(currentCfg)!);
+                await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
+                  ctx: fileCtx,
+                  cfg: currentCfg,
+                  dispatcherOptions: {
+                    deliver: async (payload: any) => {
+                      const text = payload.text ?? payload.body;
+                      if (!text) return;
+                      const limit = getThreemaConfig(currentCfg)?.textChunkLimit ?? 3500;
+                      if (text.length <= limit) {
+                        if (replyClient.isE2EEnabled) {
+                          await replyClient.sendE2E(from, text);
+                        } else {
+                          await replyClient.sendSimple(from, text);
+                        }
+                      } else {
+                        const chunks: string[] = [];
+                        let remaining = text;
+                        while (remaining.length > 0) {
+                          if (remaining.length <= limit) {
+                            chunks.push(remaining);
+                            break;
+                          }
+                          let splitIdx = remaining.lastIndexOf("\n", limit);
+                          if (splitIdx <= 0) splitIdx = limit;
+                          chunks.push(remaining.slice(0, splitIdx));
+                          remaining = remaining.slice(splitIdx).replace(/^\n/, "");
+                        }
+                        for (const chunk of chunks) {
+                          if (replyClient.isE2EEnabled) {
+                            await replyClient.sendE2E(from, chunk);
+                          } else {
+                            await replyClient.sendSimple(from, chunk);
+                          }
+                        }
+                      }
+                    },
+                    onReplyStart: () => {
+                      api.logger?.info?.(`Threema: agent file-reply started for ${from}`);
+                    },
+                  },
+                });
+                api.logger?.info?.("Threema file message dispatched via Channel Inbound Pipeline");
+              } catch (pipelineErr: any) {
+                api.logger?.error?.(`Threema file inbound pipeline error: ${pipelineErr.message}`);
+                // Fallback: legacy enqueueSystemEvent so the file isn't lost.
+                const enqueue = runtime?.system?.enqueueSystemEvent;
+                if (enqueue) {
+                  enqueue(`[Threema file from ${senderLabel} (${from})]\n${fileBody}`, {
+                    sessionKey: "agent:main:main",
+                    deliveryContext: {
+                      channel: "threema",
+                      to: from,
+                      from: from,
+                      accountId: "default",
+                      mediaPath: result?.filePath,
+                      transcription: result?.transcription,
+                    },
+                  });
+                  api.logger?.info?.("Threema file message dispatched via enqueueSystemEvent (fallback)");
+                  wakeAgent(config);
+                }
+              }
+            } else {
+              // Fallback for older OpenClaw runtimes that don't expose the
+              // channel inbound pipeline.
+              const enqueue = runtime?.system?.enqueueSystemEvent;
+              if (enqueue) {
+                enqueue(`[Threema file from ${senderLabel} (${from})]\n${fileBody}`, {
+                  sessionKey: "agent:main:main",
+                  deliveryContext: {
+                    channel: "threema",
+                    to: from,
+                    from: from,
+                    accountId: "default",
+                    mediaPath: result?.filePath,
+                    transcription: result?.transcription,
+                  },
+                });
+                api.logger?.info?.("Threema file message dispatched via enqueueSystemEvent (legacy)");
+                wakeAgent(config);
+              } else {
+                api.logger?.warn?.("Threema file: neither channel pipeline nor enqueueSystemEvent available");
+              }
             }
           } else if (decrypted?.type === 0x80) {
             // Delivery receipt - PII only on debug level
