@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.6 (2026-05-04)
+
+### Added
+- **Idempotency Cache for Webhook Replay Protection**: Implements replay-attack protection against Threema webhook retries.
+  - New message-ID deduplication mechanism with configurable TTL (24h) and cache size (500 entries max).
+  - Automatic pruning of expired entries during check.
+  - Disk persistence via `~/.openclaw/extensions/threema/.idempotency-cache/messageids.json` to survive plugin reloads.
+  - Throttled writes (max 1 per 5 seconds) to prevent excessive I/O.
+  - Prevents duplicate processing when Threema Gateway retries a failed webhook delivery.
+  - Solves the issue where Plugin reloads during `npm publish` + temporary 5xx errors could cause the same message to be processed twice.
+
 ## 0.6.5 (2026-05-04)
 
 ### Added

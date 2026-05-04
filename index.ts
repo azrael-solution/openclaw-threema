@@ -311,10 +311,18 @@ const MEDIA_ALLOWED_BASE = path.join(
   "media"
 );
 
+// Extension state directory for persistent caches
+const EXTENSION_STATE_DIR = path.join(
+  process.env.HOME || "/tmp",
+  ".openclaw",
+  "extensions",
+  "threema"
+);
+
 // Message-ID dedup cache (replay protection): messageId -> timestamp
 const seenMsgIds = new Map<string, number>();
-const MSG_ID_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const MSG_ID_CACHE_MAX = 5000;
+const MSG_ID_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const MSG_ID_CACHE_MAX = 500;
 
 // Audio MIME types that should be transcribed
 const AUDIO_MIME_TYPES = [
@@ -810,15 +818,88 @@ function buildE2EPayload(type: number, inner: Uint8Array): Uint8Array {
  * Check if a message ID has been seen recently (replay protection)
  * Returns true if duplicate (should be ignored)
  */
+// Idempotency cache directory
+const CACHE_DIR = path.join(EXTENSION_STATE_DIR, ".idempotency-cache");
+const CACHE_FILE = path.join(CACHE_DIR, "messageids.json");
+let lastCacheSave = 0;
+const CACHE_SAVE_THROTTLE_MS = 5000; // Max 1 write per 5 sec
+
+/**
+ * Load idempotency cache from disk if available and fresh
+ */
+function loadIdempotencyCache(): void {
+  try {
+    if (!fs.existsSync(CACHE_FILE)) return;
+    
+    const data = fs.readFileSync(CACHE_FILE, "utf-8");
+    const parsed = JSON.parse(data);
+    if (!parsed || typeof parsed !== "object") return;
+    
+    const now = Date.now();
+    for (const [id, ts] of Object.entries(parsed)) {
+      const timestamp = Number(ts);
+      // Only load entries that are still within TTL
+      if (!isNaN(timestamp) && now - timestamp < MSG_ID_TTL_MS) {
+        seenMsgIds.set(id, timestamp);
+      }
+    }
+  } catch (err: any) {
+    // Silently skip if cache file is corrupted or unreadable
+    // Next write will overwrite it
+  }
+}
+
+/**
+ * Save idempotency cache to disk (throttled)
+ */
+function saveIdempotencyCache(): void {
+  const now = Date.now();
+  if (now - lastCacheSave < CACHE_SAVE_THROTTLE_MS) {
+    return; // Skip this write, within throttle window
+  }
+  lastCacheSave = now;
+  
+  try {
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+    }
+    const obj: Record<string, number> = {};
+    for (const [id, ts] of seenMsgIds) {
+      obj[id] = ts;
+    }
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(obj, null, 2), "utf-8");
+  } catch (err: any) {
+    // Silently skip if write fails; in-memory cache is still valid
+  }
+}
+
+/**
+ * Check if message has been seen before (idempotency check)
+ * Returns true if duplicate (should skip), false if new (should process)
+ */
 function isDuplicateMsgId(messageId: string): boolean {
   const now = Date.now();
   
-  // Cleanup old entries if cache is too large
-  if (seenMsgIds.size > MSG_ID_CACHE_MAX) {
+  // Prune entries older than TTL
+  for (const [id, ts] of seenMsgIds) {
+    if (now - ts > MSG_ID_TTL_MS) {
+      seenMsgIds.delete(id);
+    }
+  }
+  
+  // If cache is still too large, evict oldest entries
+  if (seenMsgIds.size >= MSG_ID_CACHE_MAX) {
+    // Find and remove the oldest entry
+    let oldest = messageId;
+    let oldestTs = now;
     for (const [id, ts] of seenMsgIds) {
-      if (now - ts > MSG_ID_TTL_MS) {
-        seenMsgIds.delete(id);
+      if (ts < oldestTs) {
+        oldest = id;
+        oldestTs = ts;
       }
+    }
+    if (oldest !== messageId) {
+      seenMsgIds.delete(oldest);
     }
   }
   
@@ -830,6 +911,7 @@ function isDuplicateMsgId(messageId: string): boolean {
   
   // Mark as seen
   seenMsgIds.set(messageId, now);
+  saveIdempotencyCache(); // Throttled write
   return false;
 }
 
@@ -1872,12 +1954,16 @@ const threemaChannel = {
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.6.0";
+export const version = "0.6.6";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
 export default function register(api: any) {
   try {
+    // Load idempotency cache from disk (if available)
+    loadIdempotencyCache();
+    api.logger?.debug?.("Threema: idempotency cache loaded from disk");
+
     const config = api.config as OpenClawConfig;
     const threemaCfg = getThreemaConfig(config);
     const runtime = api.runtime;
