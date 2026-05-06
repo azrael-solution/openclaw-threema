@@ -16,6 +16,6 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["index.ts"],
+  "include": ["index.ts", "markdown-to-threema.ts"],
   "exclude": ["node_modules", "dist"]
 }

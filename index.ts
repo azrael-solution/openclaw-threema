@@ -13,6 +13,7 @@ import * as path from "path";
 import { spawnSync } from "child_process";
 import * as crypto from "crypto";
 import * as dns from "node:dns/promises";
+import { markdownToThreema } from "./markdown-to-threema.js";
 
 // ============================================================================
 // Types (matching OpenClaw's expected interfaces)
@@ -1627,11 +1628,14 @@ const threemaChannel = {
       const client = new ThreemaClient(threemaCfg);
       const to = normalizeThreemaTarget(ctx.to);
 
+      // Convert Markdown → Threema-Markup before sending.
+      const formatted = markdownToThreema(ctx.text);
+
       let messageId: string;
       if (client.isE2EEnabled) {
-        messageId = await client.sendE2E(to, ctx.text);
+        messageId = await client.sendE2E(to, formatted);
       } else {
-        messageId = await client.sendSimple(to, ctx.text);
+        messageId = await client.sendSimple(to, formatted);
       }
 
       return {
@@ -2365,12 +2369,12 @@ export default function register(api: any) {
                             if (fs.existsSync(audioPath)) {
                               const audioBuffer = fs.readFileSync(audioPath);
                               const mimeType = payload.mediaMimeType ?? "audio/aac";
-                              const caption = payload.text ?? payload.body ?? undefined;
+                              const caption = markdownToThreema(payload.text ?? payload.body) || undefined;
                               await replyClient.sendVoiceNote(from, audioBuffer, mimeType, caption);
                             } else {
                               api.logger?.warn?.(`Threema: audio file not found at ${audioPath}, falling back to text`);
                               // Fallback to text if audio file not found
-                              const text = payload.text ?? payload.body;
+                              const text = markdownToThreema(payload.text ?? payload.body);
                               if (text) {
                                 await replyClient.sendE2E(from, text);
                               }
@@ -2378,7 +2382,7 @@ export default function register(api: any) {
                           } else {
                             // Voice notes only work in E2E mode; fallback to text in basic mode
                             api.logger?.info?.(`Threema: voice notes require E2E mode, sending text instead`);
-                            const text = payload.text ?? payload.body;
+                            const text = markdownToThreema(payload.text ?? payload.body);
                             if (text) {
                               await replyClient.sendSimple(from, text);
                             }
@@ -2386,7 +2390,7 @@ export default function register(api: any) {
                         } catch (audioErr: any) {
                           api.logger?.error?.(`Threema: error sending voice note: ${audioErr.message}`);
                           // Fallback to text on error
-                          const text = payload.text ?? payload.body;
+                          const text = markdownToThreema(payload.text ?? payload.body);
                           if (text) {
                             if (replyClient.isE2EEnabled) {
                               await replyClient.sendE2E(from, text);
@@ -2397,7 +2401,7 @@ export default function register(api: any) {
                         }
                       } else {
                         // Send as text (existing logic)
-                        const text = payload.text ?? payload.body;
+                        const text = markdownToThreema(payload.text ?? payload.body);
                         if (!text) return;
                         // Chunk long replies if needed
                         const limit = getThreemaConfig(currentCfg)?.textChunkLimit ?? 3500;
@@ -2593,12 +2597,12 @@ export default function register(api: any) {
                             if (fs.existsSync(audioPath)) {
                               const audioBuffer = fs.readFileSync(audioPath);
                               const mimeType = payload.mediaMimeType ?? "audio/aac";
-                              const caption = payload.text ?? payload.body ?? undefined;
+                              const caption = markdownToThreema(payload.text ?? payload.body) || undefined;
                               await replyClient.sendVoiceNote(from, audioBuffer, mimeType, caption);
                             } else {
                               api.logger?.warn?.(`Threema: audio file not found at ${audioPath}, falling back to text`);
                               // Fallback to text if audio file not found
-                              const text = payload.text ?? payload.body;
+                              const text = markdownToThreema(payload.text ?? payload.body);
                               if (text) {
                                 await replyClient.sendE2E(from, text);
                               }
@@ -2606,7 +2610,7 @@ export default function register(api: any) {
                           } else {
                             // Voice notes only work in E2E mode; fallback to text in basic mode
                             api.logger?.info?.(`Threema: voice notes require E2E mode, sending text instead`);
-                            const text = payload.text ?? payload.body;
+                            const text = markdownToThreema(payload.text ?? payload.body);
                             if (text) {
                               await replyClient.sendSimple(from, text);
                             }
@@ -2614,7 +2618,7 @@ export default function register(api: any) {
                         } catch (audioErr: any) {
                           api.logger?.error?.(`Threema: error sending voice note: ${audioErr.message}`);
                           // Fallback to text on error
-                          const text = payload.text ?? payload.body;
+                          const text = markdownToThreema(payload.text ?? payload.body);
                           if (text) {
                             if (replyClient.isE2EEnabled) {
                               await replyClient.sendE2E(from, text);
@@ -2625,7 +2629,7 @@ export default function register(api: any) {
                         }
                       } else {
                         // Send as text (existing logic)
-                        const text = payload.text ?? payload.body;
+                        const text = markdownToThreema(payload.text ?? payload.body);
                         if (!text) return;
                         const limit = getThreemaConfig(currentCfg)?.textChunkLimit ?? 3500;
                         if (text.length <= limit) {

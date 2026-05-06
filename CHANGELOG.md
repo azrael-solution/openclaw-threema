@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.0 (2026-05-06)
+
+### Added
+- **Markdown → Threema-Markup conversion** for all outbound text. Threema natively supports `*bold*`, `_italic_`, and `~strikethrough~` since 2024 — but does NOT understand standard Markdown (`**bold**`, `# headers`, `- lists`, `[links](url)`, code fences, tables). The plugin now transparently converts Markdown into Threema-compatible markup before sending, so agent replies look correct in the Threema client without any prompt changes.
+  - New module: `markdown-to-threema.ts` (with full unit-test suite, 23/23 passing).
+  - Conversions:
+    - `**bold**` / `__bold__` → `*bold*` (Threema bold)
+    - `~~strike~~` → `~strike~` (Threema strikethrough)
+    - Single-asterisk `*x*` and underscore `_x_` left untouched.
+    - `# / ## / …` headers → `*Header*` (bold).
+    - `- / * / +` lists → `•` (Unicode bullet).
+    - Numbered lists kept as-is (Threema renders them fine plain).
+    - Blockquotes (`>`) → `│` (vertical bar).
+    - Pipe-tables → bullet-list with bold headers (`• *Header:* value`).
+    - Inline code `` `x` `` → `"x"`. Fenced code blocks → plain content, fences stripped.
+    - Links `[text](url)` → `text — url` (or just `url` when text == url).
+    - Markdown images `![alt](url)` → `[Bild: alt] — url`.
+    - Horizontal rules → unicode line.
+  - Hooked into all outbound paths: `outbound.sendText` adapter (cron / message-tool delivery), inbound text-reply callbacks (multi-chunk, voice fallback, regular DM replies), and inbound file-reply caption handling.
+  - Runs idempotently — valid Threema-already markup passes through unchanged.
+
+### Notes
+- Behaviour change: previously, agent replies containing Markdown looked unrendered in Threema (literal `**`, `##`, `|`). Now they render with Threema’s native bold/italic/strikethrough wherever possible. Plain text and existing Threema markup are unaffected.
+
 ## 0.6.7 (2026-05-04)
 
 ### Added
