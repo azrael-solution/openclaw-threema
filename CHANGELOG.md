@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1 (2026-05-09)
+
+### Fixed
+- **`tweetnacl-util` named-import broke under OpenClaw 2026.5.7's stricter ESM loader.** OC 2026.5.7 no longer accepts named-imports against CommonJS modules that use `module.exports = X`. The plugin failed to load with `SyntaxError: The requested module 'tweetnacl-util' does not provide an export named 'decodeUTF8'`.
+  - Fix: swapped `import { decodeUTF8 } from "tweetnacl-util"` for `import naclUtil from "tweetnacl-util"; const { decodeUTF8 } = naclUtil;` — same shape as how we already import `tweetnacl` itself.
+  - Mirror of the in-place hotfix that was applied to `dist/index.js` on 2026-05-08; this release pulls it back into source so it survives a fresh `npm install`.
+  - No behavior change. Drop-in upgrade from 0.7.0.
+
 ## 0.7.0 (2026-05-06)
 
 ### Added

@@ -7,7 +7,8 @@
  */
 
 import nacl from "tweetnacl";
-import { decodeUTF8 } from "tweetnacl-util";
+import naclUtil from "tweetnacl-util";
+const { decodeUTF8 } = naclUtil;
 import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
