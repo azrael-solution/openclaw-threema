@@ -2303,7 +2303,11 @@ export default function register(api: any) {
                 const channelRuntime = runtime?.channel;
                 if (channelRuntime?.routing?.resolveAgentRoute && channelRuntime?.reply?.finalizeInboundContext && channelRuntime?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
                   try {
-                    const currentCfg = runtime.config.loadConfig();
+                    // Use the read-only runtime config snapshot. loadConfig() is
+                    // deprecated (deprecated-internal-config-api guard) and slated
+                    // for removal; current() returns a DeepReadonly<OpenClawConfig>
+                    // which we only read here (route resolution + memory briefing).
+                    const currentCfg = runtime.config.current() as OpenClawConfig;
 
                 // 1. Resolve the agent route and session key
                 const route = channelRuntime.routing.resolveAgentRoute({
@@ -2533,7 +2537,9 @@ export default function register(api: any) {
                     && channelRuntime?.reply?.finalizeInboundContext
                     && channelRuntime?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
                   try {
-                    const currentCfg = runtime.config.loadConfig();
+                    // Read-only runtime config snapshot (see text path above):
+                    // loadConfig() is deprecated and on the removal list.
+                    const currentCfg = runtime.config.current() as OpenClawConfig;
 
                 // Resolve the same agent route + session key the text path uses
                 // so file inbounds end up in the live Threema DM session.
