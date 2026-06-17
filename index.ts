@@ -1951,6 +1951,139 @@ const threemaChannel = {
       });
     },
   },
+
+  // ============================================================================
+  // Message-Tool Action Adapter — powers the shared `message` tool
+  // (action=send) and internal flows like restart-recovery notices.
+  // Without this, core throws "Channel threema does not support action send".
+  // Normal agent replies go through `outbound.sendText`; this is the
+  // explicit/proactive send surface.
+  // ============================================================================
+  actions: {
+    describeMessageTool: (_params: any) => {
+      return {
+        actions: ["send"] as const,
+        capabilities: [] as const,
+      };
+    },
+
+    supportsAction: ({ action }: { action: string }): boolean =>
+      action === "send",
+
+    handleAction: async (ctx: any): Promise<any> => {
+      const { action, params, cfg } = ctx;
+
+      if (action !== "send") {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Threema: unsupported action "${action}".` },
+          ],
+        };
+      }
+
+      const threemaCfg = getThreemaConfig(cfg);
+      if (!threemaCfg?.gatewayId || !threemaCfg?.secretKey) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: "Threema not configured: missing gatewayId or secretKey." },
+          ],
+        };
+      }
+
+      // Resolve destination from common param aliases.
+      const rawTo =
+        (typeof params?.to === "string" && params.to) ||
+        (typeof params?.target === "string" && params.target) ||
+        (typeof params?.chatId === "string" && params.chatId) ||
+        "";
+      if (!rawTo) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Threema send: missing 'to'/'target'." }],
+        };
+      }
+      const to = normalizeThreemaTarget(rawTo);
+      if (!isValidThreemaId(to)) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Threema send: invalid Threema ID "${rawTo}".` }],
+        };
+      }
+
+      const mediaUrl =
+        (typeof params?.media === "string" && params.media) ||
+        (typeof params?.mediaUrl === "string" && params.mediaUrl) ||
+        (typeof params?.filePath === "string" && params.filePath) ||
+        (typeof params?.path === "string" && params.path) ||
+        "";
+      const text =
+        (typeof params?.message === "string" && params.message) ||
+        (typeof params?.text === "string" && params.text) ||
+        (typeof params?.caption === "string" && params.caption) ||
+        "";
+
+      if (!text && !mediaUrl) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Threema send: nothing to send (no message or media)." }],
+        };
+      }
+
+      try {
+        const client = new ThreemaClient(threemaCfg);
+
+        // Media path: delegate to the same outbound.sendMedia pipeline so all
+        // SSRF/local-path validation stays in one place.
+        if (mediaUrl) {
+          const result = await threemaChannel.outbound.sendMedia({
+            cfg,
+            to,
+            text,
+            mediaUrl,
+          } as any);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Threema media sent to ${to} (messageId ${(result as any)?.messageId ?? "?"}).`,
+              },
+            ],
+            meta: result,
+          };
+        }
+
+        // Text path.
+        const formatted = markdownToThreema(text);
+        const messageId = client.isE2EEnabled
+          ? await client.sendE2E(to, formatted)
+          : await client.sendSimple(to, formatted);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Threema message sent to ${to} (messageId ${messageId.trim()}).`,
+            },
+          ],
+          meta: {
+            channel: "threema",
+            messageId: messageId.trim(),
+            chatId: to,
+            timestamp: Date.now(),
+          },
+        };
+      } catch (err: any) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Threema send failed: ${err?.message ?? String(err)}` },
+          ],
+        };
+      }
+    },
+  },
 };
 
 // ============================================================================
@@ -2122,7 +2255,7 @@ async function queueInboundForCoalescing(
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.6.7";
+export const version = "0.7.2";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 

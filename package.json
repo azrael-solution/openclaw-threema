@@ -1,6 +1,6 @@
 {
   "name": "openclaw-threema",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Threema Gateway channel plugin for OpenClaw",
   "type": "module",
   "main": "dist/index.js",

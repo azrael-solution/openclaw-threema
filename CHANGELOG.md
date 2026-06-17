@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.2 (2026-06-17)
+
+### Fixed
+
+- Added `actions` adapter (`describeMessageTool` / `supportsAction` / `handleAction`)
+  so the shared `message` tool's `action=send` works on Threema. Previously core
+  threw `Channel threema does not support action send`, which also broke internal
+  flows such as the post-restart "interrupted main session recovery" notice.
+  Text + media sends reuse the existing `ThreemaClient` / `outbound.sendMedia`
+  pipeline (incl. SSRF/local-path validation). Accepts `to`/`target`/`chatId`
+  and `message`/`text`/`caption` plus `media`/`mediaUrl`/`filePath`/`path` aliases.
+- Corrected stale `export const version` (was `0.6.7`) to track package version.
+
 ## 0.7.1 (2026-05-09)
 
 ### Fixed
