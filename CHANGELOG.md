@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.4 (2026-07-05)
+
+### Fixed
+
+- **Outbound image/file media in normal agent replies now works** (the standard
+  `MEDIA:` directive). Previously the reply `deliver` handlers only had branches
+  for audio-as-voice and text — any image/file attachment fell through into the
+  text path and was silently dropped (no blob upload, no error). The agent could
+  send a picture and the user would receive only the caption text, if anything.
+- Both `deliver` handlers (E2E + fallback pipeline) now resolve outbound media the
+  way core supplies it: prefer `payload.mediaUrls` (array) and fall back to the
+  legacy `payload.mediaUrl` (string), matching core's `resolveOutboundMediaUrls`.
+  Non-audio media is sent via the existing `outbound.sendMedia` pipeline (which
+  already handles local-path/`MEDIA_ALLOWED_BASE` validation + blob upload), with
+  the reply text ridden along as the caption. If every media send fails, it falls
+  back to sending the text so the reply is never lost.
+- Note: outbound media must still live under `~/.openclaw/media/` (exfiltration
+  guard, `MEDIA_ALLOWED_BASE`). Paths outside are rejected by design.
+
+## 0.7.3 (2026-06-26)
+
+### Changed
+
+- **Memory-briefing now uses "Variante C" (decided by aza 2026-06-21).** Previously
+  the full memory snapshot (Current State + entire Akut section) was appended to
+  *every* inbound Threema message — which read like an unsolicited status card and
+  burned tokens. New behavior:
+  - **Short briefing on every inbound:** just 1-2 core lines — live `openclaw --version`
+    plus the single most-acute pending one-liner.
+  - **Full snapshot only after an idle gap (> 2 h)** per session, so the agent
+    re-orients after longer pauses without spamming the full block each turn.
+  - **OpenClaw version is pulled LIVE** via `openclaw --version` (10-min cache),
+    instead of a static line copied from MEMORY.md — fixes the "briefing shows a
+    stale/wrong version" annoyance.
+  - Per-session idle tracking (`lastInboundBySession`), short/full briefings cached
+    60 s per workspace, version cached 10 min. Fail-silent throughout; CommandBody /
+    RawBody stay clean for slash-command parsing.
+
 ## 0.7.2 (2026-06-17)
 
 ### Fixed
