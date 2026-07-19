@@ -1,6 +1,6 @@
 # openclaw-threema
 
-Threema Gateway channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) — privacy-focused E2E encrypted messaging via the [Threema Gateway API](https://gateway.threema.ch/).
+Threema Gateway channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) - privacy-focused E2E encrypted messaging via the [Threema Gateway API](https://gateway.threema.ch/en/developer/api).
 
 ## Features
 
@@ -13,7 +13,7 @@ Threema Gateway channel plugin for [OpenClaw](https://github.com/openclaw/opencl
 
 ## Requirements
 
-- A [Threema Gateway](https://gateway.threema.ch/) account (E2E mode)
+- A [Threema Gateway](https://threema.com/en/products/work/gateway) account (E2E mode)
 - OpenClaw 2026.3.2+ with channel plugin support
 - For voice transcription: [OpenAI Whisper](https://github.com/openai/whisper) installed locally
 
@@ -66,7 +66,7 @@ Then add to your `openclaw.json`:
 openclaw threema keygen
 ```
 
-This outputs a NaCl key pair. Add the private key to your config and upload the public key to the [Threema Gateway admin panel](https://gateway.threema.ch/).
+This outputs a NaCl key pair. Add the private key to your config and upload the public key to the [Threema Gateway admin panel](https://gateway.threema.ch/en/login).
 
 ### 2. Configure webhook
 
@@ -92,6 +92,18 @@ openclaw gateway restart
 openclaw threema status
 openclaw threema send ABCD1234 "Hello from OpenClaw!"
 ```
+
+## Related X/Twitter Workflows
+
+Keep this plugin responsible for Threema Gateway conversations, E2E encrypted text, encrypted media blobs, voice transcription, webhook delivery, DM policy, and Threema CLI tools. When the same OpenClaw agent also needs public X/Twitter data or visible X/Twitter actions, install TweetClaw as a separate OpenClaw plugin:
+
+```bash
+openclaw plugins install clawhub:@xquik/tweetclaw
+```
+
+[TweetClaw](https://github.com/Xquik-dev/tweetclaw) covers scrape tweets, search tweets, search tweet replies, follower export, user lookup, media upload and download, direct messages, monitor tweets, webhooks, giveaway draws, and approval-gated post tweets or post tweet replies. Use the [GitHub repo](https://github.com/Xquik-dev/tweetclaw) for setup details. The canonical npm fallback is `openclaw plugins install npm:@xquik/tweetclaw`. Keep X/Twitter connection settings separate from Threema Gateway settings and review visible X/Twitter actions through OpenClaw approval flows.
+
+Xquik is an independent third-party service. Not affiliated with X Corp. "Twitter" and "X" are trademarks of X Corp.
 
 ## DM Policies
 
