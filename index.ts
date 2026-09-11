@@ -15,6 +15,7 @@ import { spawnSync } from "child_process";
 import * as crypto from "crypto";
 import * as dns from "node:dns/promises";
 import { markdownToThreema } from "./markdown-to-threema.js";
+import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
 
 // ============================================================================
 // Types (matching OpenClaw's expected interfaces)
@@ -2237,12 +2238,25 @@ interface PendingInbound {
   sender: string;
   parts: CoalescePart[];
   firstSeenAt: number;
-  flushTimer?: NodeJS.Timeout;
+  /**
+   * Absolute Zeit, zu der geflusht werden soll. Re-arm verschiebt sie nach
+   * hinten, max-parts zieht sie auf 0 vor. Ersetzt den frueheren flushTimer:
+   * ein setTimeout-Callback laeuft NACH der Webhook-Ack und damit ausserhalb
+   * der Work-Admission -> GatewayDrainingError (Ursache des Threema-Ausfalls
+   * seit 2026-09-04). Siehe docs/plugins/sdk-subpaths.md, "Post-ack webhook work".
+   */
+  deadline: number;
+  /** Die EINE detached Admission dieses Batches. */
+  detached?: Promise<void>;
   inFlight: boolean;
 }
 
 const COALESCE_WINDOW_MS = 3000; // 3 second coalescing window
 const COALESCE_MAX_PARTS = 5;    // Max parts before flushing
+const COALESCE_POLL_MS = 250;    // Aufloesung, mit der Deadline-Aenderungen greifen
+
+const coalesceSleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 const pendingPerSender = new Map<string, PendingInbound>();
 const queuedPerSender = new Map<string, PendingInbound>();
 let _globalLogger: any = null;
@@ -2288,8 +2302,6 @@ async function triggerFlush(
   const pending = pendingPerSender.get(sender);
   if (!pending || pending.inFlight) return;
 
-  if (pending.flushTimer) clearTimeout(pending.flushTimer);
-  pending.flushTimer = undefined;
   pending.inFlight = true;
 
   const merged = mergeCoalescedParts(pending.parts);
@@ -2312,11 +2324,13 @@ async function triggerFlush(
         sender,
         parts: queued.parts,
         firstSeenAt: Date.now(),
+        deadline: 0, // schon gewartet - sofort flushen
         inFlight: false,
       };
       pendingPerSender.set(sender, newPending);
-      // Flush queued batch immediately (no further window — they already waited)
-      void triggerFlush(sender, dispatcher).catch((err) => {
+      // Flush queued batch immediately (no further window — they already waited).
+      // AWAIT statt void: haelt die Kette innerhalb derselben detached Admission.
+      await triggerFlush(sender, dispatcher).catch((err) => {
         _globalLogger?.error?.(`Threema coalesce: error in chained flush: ${err.message}`);
       });
     }
@@ -2335,33 +2349,37 @@ async function queueInboundForCoalescing(
       sender,
       parts: [part],
       firstSeenAt: Date.now(),
+      deadline: Date.now() + COALESCE_WINDOW_MS,
       inFlight: false,
     };
     pendingPerSender.set(sender, pending);
     _globalLogger?.info?.(`Threema coalesce: started batch sender=${sender}`);
 
-    pending.flushTimer = setTimeout(() => {
-      void triggerFlush(sender, dispatcher).catch((err) => {
-        _globalLogger?.error?.(`Threema coalesce: error in scheduled flush: ${err.message}`);
-      });
-    }, COALESCE_WINDOW_MS);
+    // Eine detached Admission pro Batch, SYNCHRON hier im noch zugelassenen
+    // Webhook-Kontext aufgespannt. Das Warten liegt INNERHALB der detached
+    // Arbeit - ein setTimeout-Callback waere bereits nach der Ack und damit
+    // ausserhalb der Admission.
+    const batch = pending;
+    batch.detached = runDetachedWebhookWork(async () => {
+      while (Date.now() < batch.deadline) {
+        await coalesceSleep(Math.min(COALESCE_POLL_MS, batch.deadline - Date.now()));
+      }
+      await triggerFlush(sender, dispatcher);
+    }).catch((err: any) => {
+      _globalLogger?.error?.(`Threema coalesce: detached flush failed: ${err?.message ?? err}`);
+    });
   } else if (!pending.inFlight) {
     pending.parts.push(part);
     _globalLogger?.info?.(`Threema coalesce: added part (sender=${sender}, parts=${pending.parts.length})`);
 
-    if (pending.flushTimer) clearTimeout(pending.flushTimer);
-
     if (pending.parts.length >= COALESCE_MAX_PARTS) {
       _globalLogger?.info?.(`Threema coalesce: max parts reached, flushing now`);
-      void triggerFlush(sender, dispatcher).catch((err) => {
-        _globalLogger?.error?.(`Threema coalesce: error in max-parts flush: ${err.message}`);
-      });
+      // Deadline vorziehen - die laufende detached Arbeit flusht beim naechsten
+      // Poll. Kein zweiter Admission-Root, kein void-Aufruf nach der Ack.
+      pending.deadline = 0;
     } else {
-      pending.flushTimer = setTimeout(() => {
-        void triggerFlush(sender, dispatcher).catch((err) => {
-          _globalLogger?.error?.(`Threema coalesce: error in scheduled flush: ${err.message}`);
-        });
-      }, COALESCE_WINDOW_MS);
+      // Re-arm: nur die Deadline verschieben, die detached Arbeit wartet weiter.
+      pending.deadline = Date.now() + COALESCE_WINDOW_MS;
     }
   } else {
     // In-flight: queue for next batch
@@ -2371,6 +2389,7 @@ async function queueInboundForCoalescing(
         sender,
         parts: [part],
         firstSeenAt: Date.now(),
+        deadline: 0,
         inFlight: false,
       };
       queuedPerSender.set(sender, queued);
@@ -2383,7 +2402,7 @@ async function queueInboundForCoalescing(
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.7.4";
+export const version = "0.7.5";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.7.5 (2026-09-11)
+
+### Fixed
+
+- **Inbound messages were silently dropped on OpenClaw 2026.9.x** with
+  `GatewayDrainingError`, even though the webhook was received and the gateway was
+  healthy. The message coalescing window (which batches rapid consecutive messages
+  from one sender) was implemented with `setTimeout`. That callback fires *after*
+  the webhook request has already been acknowledged, so the follow-up work ran
+  outside the gateway's work admission and was rejected. Symptom: `webhook
+  received` in the log, then an error a few seconds later, and the agent never
+  saw the message. A gateway restart appeared to "fix" it because the next
+  message arrived before the admission state went stale — so the bug looked
+  intermittent while it was in fact systematic.
+- The wait now happens *inside* a single detached admission opened synchronously
+  in the still-admitted webhook context, via `runDetachedWebhookWork` from
+  `openclaw/plugin-sdk/webhook-request-guards`. The flush timer was replaced by an
+  absolute `deadline` polled every 250 ms: re-arming pushes the deadline back,
+  hitting max-parts pulls it to 0. No second admission root, no post-ack call.
+
+### Changed
+
+- Added `peerDependencies: { "openclaw": ">=2026.9.1" }`. The fix imports the
+  `plugin-sdk/webhook-request-guards` subpath, which older cores do not export.
+  Installing this version against an older OpenClaw would fail at import time,
+  so the requirement is now declared instead of discovered at runtime.
+
 ## 0.7.4 (2026-07-05)
 
 ### Fixed
