@@ -16,6 +16,7 @@ import * as crypto from "crypto";
 import * as dns from "node:dns/promises";
 import { markdownToThreema } from "./markdown-to-threema.js";
 import { runDetachedWebhookWork } from "openclaw/plugin-sdk/webhook-request-guards";
+import { toInboundMediaFacts } from "openclaw/plugin-sdk/channel-inbound";
 
 // ============================================================================
 // Types (matching OpenClaw's expected interfaces)
@@ -2402,7 +2403,7 @@ async function queueInboundForCoalescing(
 
 export const id = "threema";
 export const name = "Threema Gateway";
-export const version = "0.7.5";
+export const version = "0.7.6";
 export const description =
   "Threema messaging channel via Threema Gateway API (E2E encrypted, with media support)";
 
@@ -2419,11 +2420,10 @@ export default function register(api: any) {
     const threemaCfg = getThreemaConfig(config);
     const runtime = api.runtime;
 
-    // Store runtime reference for wakeAgent() to use requestHeartbeatNow
+    // Store runtime reference for wakeAgent() (requestHeartbeat, 0.7.6)
     _runtimeApi = runtime;
 
-    // Debug: check if requestHeartbeatNow is available
-    api.logger?.info?.(`Threema wake API: runtime.system.requestHeartbeatNow=${typeof runtime?.system?.requestHeartbeatNow}`);
+    api.logger?.info?.(`Threema wake API: requestHeartbeat=${typeof runtime?.system?.requestHeartbeat} requestHeartbeatNow=${typeof runtime?.system?.requestHeartbeatNow}`);
 
     // Register the channel plugin
     api.registerChannel({ plugin: threemaChannel });
@@ -2895,6 +2895,20 @@ export default function register(api: any) {
                   ConversationLabel: senderLabel || from,
                   Timestamp: Date.now(),
                   CommandAuthorized: senderAllowed,
+                  // 0.7.6: ordered media facts instead of the deprecated
+                  // MediaPath/MediaUrl/MediaType projection (media-legacy-projection).
+                  media: merged.primaryMediaPath
+                    ? toInboundMediaFacts([{
+                        path: merged.primaryMediaPath,
+                        url: merged.primaryMediaPath,
+                        contentType: merged.primaryMimeType || "application/octet-stream",
+                        fileName: merged.primaryFileMsg?.n || null,
+                        messageId,
+                      }])
+                    : undefined,
+                  // Legacy projection kept alongside media facts: on 2026.9.5 the
+                  // image only reaches the model through these fields (verified
+                  // 2026-10-10). Remove once the host consumes `media` here.
                   MediaPath: merged.primaryMediaPath,
                   MediaUrl: merged.primaryMediaPath,
                   MediaType: merged.primaryMimeType || "application/octet-stream",
@@ -3255,7 +3269,19 @@ export default function register(api: any) {
 let _runtimeApi: any = null;
 
 function wakeAgent(config: any) {
-  // Prefer the new requestHeartbeatNow API (2026.3.2+) — direct, no HTTP roundtrip
+  // 0.7.6: canonical requestHeartbeat({ source, intent, reason }) (2026.9.x+).
+  if (_runtimeApi?.system?.requestHeartbeat) {
+    try {
+      _runtimeApi.system.requestHeartbeat({
+        source: "other",
+        intent: "event",
+        reason: "threema-inbound",
+        sessionKey: "agent:main:main",
+      });
+      return;
+    } catch {}
+  }
+  // Deprecated alias (removeAfter 2026-10-01) — kept for older hosts.
   if (_runtimeApi?.system?.requestHeartbeatNow) {
     try {
       _runtimeApi.system.requestHeartbeatNow({ sessionKey: "agent:main:main" });

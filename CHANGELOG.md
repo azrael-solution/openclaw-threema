@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.6 (2026-10-09)
+
+- **Heartbeat wake:** use the canonical `api.runtime.system.requestHeartbeat({ source: "other", intent: "event", reason: "threema-inbound" })`. The deprecated `requestHeartbeatNow` alias (`plugin-runtime-api-compat-aliases`, removeAfter 2026-10-01) is kept only as a fallback, followed by the HTTP `/hooks/wake` fallback.
+- **Inbound media:** pass attachments as ordered media facts (`toInboundMediaFacts` from `openclaw/plugin-sdk/channel-inbound`) in addition to the deprecated `MediaPath`/`MediaUrl`/`MediaType` projection (`media-legacy-projection`). The legacy fields stay for now: on OpenClaw 2026.9.5 inbound images only reach the model through them. Prepares for OpenClaw 2026.10.x.
+- **Manifest:** `openclaw.plugin.json` version was stuck at 0.7.4; now in sync (0.7.6).
+- Tested against OpenClaw 2026.9.5; `peerDependencies.openclaw` unchanged (`>=2026.9.1`).
+
 ## 0.7.5 (2026-09-11)
 
 ### Fixed
